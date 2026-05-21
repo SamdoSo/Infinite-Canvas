@@ -4,8 +4,6 @@ import base64
 import urllib.request
 import urllib.parse
 import urllib.error
-import ssl
-import certifi
 import os
 import re
 import random
@@ -199,6 +197,7 @@ NEXT_TASK_ID = 1
 UPDATE_LOCK = Lock()
 
 PROVIDER_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{2,40}$")
+SUPPORTED_PROVIDER_PROTOCOLS = {"openai", "apimart", "gemini"}
 
 def ensure_runtime_config_files():
     """首次运行时提前创建配置目录，避免第一次保存 API Key 时才创建目录/文件。"""
@@ -282,7 +281,7 @@ CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-2")
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "You are a helpful assistant.")
 MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "30"))
-AI_REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "120"))
+AI_REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "1800"))
 IMAGE_POLL_INTERVAL = float(os.getenv("IMAGE_POLL_INTERVAL", "2"))
 IMAGE_TASK_TIMEOUT = float(os.getenv("IMAGE_TASK_TIMEOUT", str(AI_REQUEST_TIMEOUT)))
 COMFYUI_HISTORY_TIMEOUT = int(float(os.getenv("COMFYUI_HISTORY_TIMEOUT", "1800")))
@@ -508,6 +507,8 @@ def provider_endpoint_url(provider, key, default_path):
         return override
     if base_url.endswith("/v1") and default_path.startswith("/v1/"):
         return f"{base_url}{default_path[3:]}"
+    if base_url.endswith("/v1beta") and default_path.startswith("/v1beta/"):
+        return f"{base_url}{default_path[7:]}"
     return f"{base_url}{default_path}"
 
 def normalize_provider(item):
@@ -519,7 +520,7 @@ def normalize_provider(item):
     if base_url and not re.match(r"^https?://", base_url):
         raise HTTPException(status_code=400, detail=f"{name} 的 Base URL 需要以 http:// 或 https:// 开头")
     protocol = str(item.get("protocol") or "openai").strip().lower()
-    if protocol not in {"openai", "apimart"}:
+    if protocol not in SUPPORTED_PROVIDER_PROTOCOLS:
         protocol = "openai"
     image_generation_endpoint = normalize_endpoint_override(item.get("image_generation_endpoint"), "文生图端口")
     image_edit_endpoint = normalize_endpoint_override(item.get("image_edit_endpoint"), "图生图/编辑端口")
@@ -690,7 +691,7 @@ def github_json(url: str, use_etag_cache: bool = False):
             headers["If-None-Match"] = GITHUB_TREE_CACHE["etag"]
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=30, context=_ssl_context()) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             etag = resp.headers.get("ETag", "")
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
             if use_etag_cache and cache_key == GITHUB_TREE_URL:
@@ -707,13 +708,9 @@ def github_json(url: str, use_etag_cache: bool = False):
             return GITHUB_TREE_CACHE["data"]
         raise
 
-def _ssl_context():
-    """使用 certifi 证书包，兼容 python.org 安装的 macOS Python（不信任系统证书）"""
-    return ssl.create_default_context(cafile=certifi.where())
-
 def github_bytes(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "Infinite-Canvas-Updater"})
-    with urllib.request.urlopen(req, timeout=60, context=_ssl_context()) as resp:
+    with urllib.request.urlopen(req, timeout=60) as resp:
         return resp.read()
 
 def safe_update_target(path: str) -> str:
@@ -1406,7 +1403,10 @@ def api_headers(json_body=True, provider=None):
         api_key = AI_API_KEY
         if not api_key:
             raise HTTPException(status_code=400, detail="未配置 COMFLY_API_KEY，请在 API/.env 中填写。")
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    if provider and provider_protocol(provider) == "gemini":
+        headers = {"Accept": "application/json", "x-goog-api-key": api_key}
+    else:
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
     if json_body:
         headers["Content-Type"] = "application/json"
     return headers
@@ -1468,6 +1468,28 @@ def sse_event(data):
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 def extract_image(data):
+    candidates = data.get("candidates") if isinstance(data, dict) else None
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            content = candidate.get("content") or {}
+            parts = content.get("parts") if isinstance(content, dict) else None
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                inline = part.get("inlineData") or part.get("inline_data") or {}
+                if not isinstance(inline, dict):
+                    continue
+                value = inline.get("data")
+                if value:
+                    return {
+                        "type": "b64",
+                        "value": value,
+                        "mime_type": inline.get("mimeType") or inline.get("mime_type") or "image/png",
+                    }
     if isinstance(data.get("data"), dict) and isinstance(data["data"].get("result"), dict):
         data = data["data"]
     if isinstance(data.get("result"), dict):
@@ -1515,6 +1537,9 @@ def provider_protocol(provider):
 def is_apimart_provider(provider):
     base_url = str((provider or {}).get("base_url") or "").lower()
     return provider_protocol(provider) == "apimart" or "apimart.ai" in base_url
+
+def is_gemini_provider(provider):
+    return provider_protocol(provider) == "gemini"
 
 async def wait_for_image_task(client, task_id, provider=None):
     base_url = (provider.get("base_url") if provider else AI_BASE_URL).rstrip("/")
@@ -1916,6 +1941,13 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
     filename = f"{prefix}{uuid.uuid4().hex[:10]}.png"
     path = output_path_for(filename, category)
     if image_data["type"] == "b64":
+        mime_type = str(image_data.get("mime_type") or "").lower()
+        if "jpeg" in mime_type or "jpg" in mime_type:
+            filename = filename[:-4] + ".jpg"
+            path = output_path_for(filename, category)
+        elif "webp" in mime_type:
+            filename = filename[:-4] + ".webp"
+            path = output_path_for(filename, category)
         with open(path, "wb") as f:
             f.write(base64.b64decode(image_data["value"]))
         return output_url_for(filename, category)
@@ -2097,10 +2129,65 @@ async def generate_modelscope_provider_image(prompt, size, model, reference_imag
                 raise HTTPException(status_code=502, detail=f"ModelScope 任务失败：{detail}")
         raise HTTPException(status_code=504, detail=f"ModelScope 生图任务超时：{last_payload}")
 
+def gemini_model_name(model):
+    value = selected_model(model, "gemini-3-pro-image-preview").strip()
+    return value[len("models/"):] if value.startswith("models/") else value
+
+def gemini_endpoint_url(provider, model):
+    model_name = urllib.parse.quote(gemini_model_name(model), safe="")
+    return provider_endpoint_url(provider, "image_generation_endpoint", f"/v1beta/models/{model_name}:generateContent")
+
+def gemini_image_config(size):
+    width, height = parse_size_pair(size)
+    if not width or not height:
+        raw = str(size or "").strip().upper()
+        if raw in {"1K", "2K", "4K"}:
+            return {"aspectRatio": "1:1", "imageSize": raw}
+        if re.fullmatch(r"\d+\s*:\s*\d+", raw):
+            return {"aspectRatio": raw.replace(" ", ""), "imageSize": "1K"}
+        return {"aspectRatio": "1:1", "imageSize": "2K"}
+    aspect_ratio, resolution = apimart_size_resolution(size)
+    return {"aspectRatio": aspect_ratio, "imageSize": resolution.upper()}
+
+def gemini_reference_part(ref):
+    value = reference_to_data_url(ref, max_size=1536)
+    if not value:
+        return None
+    if isinstance(value, str) and value.startswith("data:image/") and ";base64," in value:
+        header, encoded = value.split(";base64,", 1)
+        mime_type = header.replace("data:", "", 1) or "image/png"
+        return {"inlineData": {"mimeType": mime_type, "data": encoded}}
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        return {"fileData": {"mimeType": "image/png", "fileUri": value}}
+    return None
+
+async def generate_gemini_provider_image(prompt, size, model, reference_images=None, provider=None):
+    model_name = gemini_model_name(model)
+    endpoint = gemini_endpoint_url(provider, model_name)
+    parts = [{"text": prompt.strip()}]
+    for ref in (reference_images or [])[:16]:
+        part = gemini_reference_part(ref)
+        if part:
+            parts.append(part)
+    body = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": gemini_image_config(size),
+        },
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0)) as client:
+        response = await client.post(endpoint, headers=api_headers(provider=provider), json=body)
+        response.raise_for_status()
+        raw = response.json()
+        return extract_image(raw), raw
+
 async def generate_ai_image(prompt, size, quality, model, reference_images=None, provider_id="comfly"):
     provider = get_api_provider(provider_id)
     if provider["id"] == "modelscope":
         return await generate_modelscope_provider_image(prompt, size, model, reference_images, provider)
+    if is_gemini_provider(provider):
+        return await generate_gemini_provider_image(prompt, size, model, reference_images, provider)
     is_gpt2 = is_gpt_image_2_model(model)
     is_apimart = is_apimart_provider(provider)
     quality = str(quality or "").strip().lower()
@@ -2116,7 +2203,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
     refs = [ref for ref in (reference_images or []) if ref.get("url")]
     mask_refs = [ref for ref in refs if str(ref.get("role") or "").strip().lower() == "mask" or str(ref.get("name") or "").lower().endswith("_mask.png")]
     image_refs = [ref for ref in refs if ref not in mask_refs]
-    request_timeout = httpx.Timeout(connect=20.0, read=600.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart) else AI_REQUEST_TIMEOUT
+    request_timeout = httpx.Timeout(connect=20.0, read=1800.0, write=120.0, pool=20.0) if (is_gpt2 or is_apimart) else AI_REQUEST_TIMEOUT
     async with httpx.AsyncClient(timeout=request_timeout) as client:
         response = None
         async def post_openai_edits(edit_files=None):
@@ -2412,6 +2499,56 @@ class TestConnectionPayload(BaseModel):
     base_url: str = ""
     api_key: str = ""
     provider_id: str = ""
+    protocol: str = "openai"
+
+def protocol_from_payload(payload):
+    protocol = str(getattr(payload, "protocol", "") or "openai").strip().lower()
+    return protocol if protocol in SUPPORTED_PROVIDER_PROTOCOLS else "openai"
+
+def upstream_models_url(base_url: str, protocol: str):
+    if protocol == "gemini":
+        return f"{base_url}/models" if base_url.endswith("/v1beta") else f"{base_url}/v1beta/models"
+    return f"{base_url}/models" if base_url.endswith("/v1") else f"{base_url}/v1/models"
+
+def upstream_model_headers(api_key: str, protocol: str):
+    if protocol == "gemini":
+        return {"x-goog-api-key": api_key, "Accept": "application/json"}
+    return {"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+
+def classify_upstream_model(mid):
+    lc = str(mid or "").lower()
+    video_keys = ["veo", "sora", "wan2", "wanx", "doubao-seedance", "doubao-1", "kling", "hailuo", "video", "t2v-", "i2v-", "s2v"]
+    if any(k in lc for k in video_keys):
+        return "video"
+    image_keys = ["banana", "image", "dalle", "dall-e", "imagen", "flux", "stable", "sdxl", "midjourney", "nano-banana", "ideogram", "fal-ai", "z-image", "qwen-image", "klein"]
+    if any(k in lc for k in image_keys):
+        return "image"
+    return "chat"
+
+def parse_upstream_models(raw, protocol="openai"):
+    items = raw.get("data") if isinstance(raw, dict) else None
+    if not items and isinstance(raw, dict):
+        items = raw.get("models") or raw.get("list") or []
+    if not isinstance(items, list):
+        items = []
+    ids = []
+    for it in items:
+        if isinstance(it, str):
+            mid = it
+        elif isinstance(it, dict):
+            mid = it.get("id") or it.get("name") or it.get("model")
+        else:
+            mid = ""
+        if mid:
+            mid = str(mid)
+            if protocol == "gemini" and mid.startswith("models/"):
+                mid = mid[len("models/"):]
+            ids.append(mid)
+    ids = sorted(set(ids))
+    grouped = {"image": [], "chat": [], "video": []}
+    for mid in ids:
+        grouped[classify_upstream_model(mid)].append(mid)
+    return grouped, ids
 
 @app.post("/api/providers/test-connection")
 async def test_provider_connection(payload: TestConnectionPayload):
@@ -2426,37 +2563,15 @@ async def test_provider_connection(payload: TestConnectionPayload):
         api_key = os.getenv(provider_key_env(payload.provider_id), "")
     if not api_key:
         raise HTTPException(status_code=400, detail="请先填写或保存 API Key")
-    url = f"{base_url}/models" if base_url.endswith("/v1") else f"{base_url}/v1/models"
+    protocol = protocol_from_payload(payload)
+    url = upstream_models_url(base_url, protocol)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
+            resp = await client.get(url, headers=upstream_model_headers(api_key, protocol))
         if resp.status_code >= 400:
             return {"ok": False, "status": resp.status_code, "message": resp.text[:300]}
         data = resp.json() if resp.text else {}
-        items = (data.get("data") if isinstance(data, dict) else None) or []
-        # 抽取模型 id
-        ids = []
-        for it in items:
-            if isinstance(it, str):
-                ids.append(it)
-            elif isinstance(it, dict):
-                mid = it.get("id") or it.get("name") or it.get("model")
-                if mid:
-                    ids.append(str(mid))
-        ids = sorted(set(ids))
-        # 关键字分类
-        def classify(mid):
-            lc = mid.lower()
-            video_keys = ["veo", "sora", "wan2", "wanx", "doubao-seedance", "doubao-1", "kling", "hailuo", "video", "t2v-", "i2v-", "s2v"]
-            if any(k in lc for k in video_keys):
-                return "video"
-            image_keys = ["image", "dalle", "dall-e", "imagen", "flux", "stable", "sdxl", "midjourney", "nano-banana", "ideogram", "fal-ai", "z-image", "qwen-image", "klein"]
-            if any(k in lc for k in image_keys):
-                return "image"
-            return "chat"
-        grouped = {"image": [], "chat": [], "video": []}
-        for mid in ids:
-            grouped[classify(mid)].append(mid)
+        grouped, ids = parse_upstream_models(data, protocol)
         return {"ok": True, "status": resp.status_code, "model_count": len(ids), "image_models": grouped["image"], "chat_models": grouped["chat"], "video_models": grouped["video"], "all": ids}
     except httpx.HTTPError as e:
         return {"ok": False, "status": 0, "message": str(e)[:300]}
@@ -2510,8 +2625,8 @@ async def probe_async_endpoint(payload: TestConnectionPayload):
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=str(e)[:300])
 
-async def fetch_models_from_upstream(base_url: str, api_key: str):
-    """从 OpenAI 兼容 /v1/models 端点拉取模型，并按名称做轻量分类。"""
+async def fetch_models_from_upstream(base_url: str, api_key: str, protocol: str = "openai"):
+    """从上游模型列表端点拉取模型，并按名称做轻量分类。"""
     base_url = (base_url or "").strip().rstrip("/")
     if not base_url:
         raise HTTPException(status_code=400, detail="请先填写请求地址")
@@ -2520,43 +2635,18 @@ async def fetch_models_from_upstream(base_url: str, api_key: str):
     api_key = (api_key or "").strip()
     if not api_key:
         raise HTTPException(status_code=400, detail="请先填写或保存 API Key")
-    url = f"{base_url}/models" if base_url.endswith("/v1") else f"{base_url}/v1/models"
+    protocol = protocol if protocol in SUPPORTED_PROVIDER_PROTOCOLS else "openai"
+    url = upstream_models_url(base_url, protocol)
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
+            resp = await client.get(url, headers=upstream_model_headers(api_key, protocol))
             if resp.status_code >= 400:
-                raise HTTPException(status_code=resp.status_code, detail=f"上游 /v1/models 失败：{resp.text[:300]}")
+                endpoint_label = "/v1beta/models" if protocol == "gemini" else "/v1/models"
+                raise HTTPException(status_code=resp.status_code, detail=f"上游 {endpoint_label} 失败：{resp.text[:300]}")
             raw = resp.json()
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"请求上游模型列表失败：{e}")
-    # 兼容多种返回结构：{data:[{id:...},...]} 或 {models:[...]}
-    items = raw.get("data") if isinstance(raw, dict) else None
-    if not items and isinstance(raw, dict):
-        items = raw.get("models") or raw.get("list") or []
-    if not isinstance(items, list):
-        items = []
-    ids = []
-    for it in items:
-        if isinstance(it, str):
-            ids.append(it)
-        elif isinstance(it, dict):
-            mid = it.get("id") or it.get("name") or it.get("model")
-            if mid:
-                ids.append(str(mid))
-    ids = sorted(set(ids))
-    # 分类规则（按关键字）
-    def classify(mid):
-        lc = mid.lower()
-        video_keys = ["veo", "sora", "wan2", "wanx", "doubao-seedance", "doubao-1", "kling", "hailuo", "video", "t2v-", "i2v-", "s2v"]
-        if any(k in lc for k in video_keys):
-            return "video"
-        image_keys = ["image", "dalle", "dall-e", "imagen", "flux", "stable", "sdxl", "midjourney", "nano-banana", "ideogram", "fal-ai", "z-image", "qwen-image", "klein"]
-        if any(k in lc for k in image_keys):
-            return "image"
-        return "chat"
-    grouped = {"image": [], "chat": [], "video": []}
-    for mid in ids:
-        grouped[classify(mid)].append(mid)
+    grouped, ids = parse_upstream_models(raw, protocol)
     return {"total": len(ids), "image_models": grouped["image"], "chat_models": grouped["chat"], "video_models": grouped["video"], "all": ids}
 
 @app.post("/api/providers/fetch-models")
@@ -2565,7 +2655,7 @@ async def fetch_upstream_models_from_payload(payload: TestConnectionPayload):
     api_key = (payload.api_key or "").strip()
     if not api_key and payload.provider_id:
         api_key = os.getenv(provider_key_env(payload.provider_id), "")
-    return await fetch_models_from_upstream(payload.base_url, api_key)
+    return await fetch_models_from_upstream(payload.base_url, api_key, protocol_from_payload(payload))
 
 @app.get("/api/providers/{provider_id}/fetch-models")
 async def fetch_upstream_models(provider_id: str):
@@ -2574,7 +2664,7 @@ async def fetch_upstream_models(provider_id: str):
     api_key = os.getenv(provider_key_env(provider["id"]), "")
     if not api_key:
         raise HTTPException(status_code=400, detail=f"{provider.get('name') or provider_id} 未配置 API Key")
-    return await fetch_models_from_upstream(provider.get("base_url") or "", api_key)
+    return await fetch_models_from_upstream(provider.get("base_url") or "", api_key, provider_protocol(provider))
 
 async def build_online_image_result(payload: OnlineImageRequest):
     provider = get_api_provider(payload.provider_id)
