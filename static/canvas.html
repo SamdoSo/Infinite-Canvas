@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-studio-scale="off">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -16,12 +16,12 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.05.27.1"></script>
-    <script src="/static/vendor/js/lucide.js?v=2026.05.27.1"></script>
-    <script src="/static/js/theme.js?v=2026.05.27.1"></script>
-    <script src="/static/js/i18n.js?v=2026.05.27.1"></script>
-    <link rel="stylesheet" href="/static/css/canvas.css?v=2026.05.27.1">
-    <link rel="stylesheet" href="/static/css/theme.css?v=2026.05.27.1">
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.06.04"></script>
+    <script src="/static/vendor/js/lucide.js?v=2026.06.04"></script>
+    <script src="/static/js/theme.js?v=2026.06.04"></script>
+    <script src="/static/js/i18n.js?v=2026.06.04"></script>
+    <link rel="stylesheet" href="/static/css/canvas.css?v=2026.06.04">
+    <link rel="stylesheet" href="/static/css/theme.css?v=2026.06.04">
 </head>
 <body>
     <div id="shell" class="shell no-canvas">
@@ -51,6 +51,7 @@
                     <button class="tool-btn" onclick="groupSelectedImages()"><i data-lucide="group" class="w-4 h-4"></i><span data-i18n="canvas.group">分组</span></button>
                 </div>
                 <div class="toolbar-fixed">
+                    <button id="canvasAssetToggle" class="tool-btn toolbar-asset canvas-asset-toggle" type="button" title="资产库" aria-label="资产库"><i data-lucide="library" class="w-4 h-4"></i><span>资产库</span></button>
                     <button class="tool-btn toolbar-log" onclick="openCanvasLog()" title="日志" aria-label="日志" data-i18n-title="canvas.logs"><i data-lucide="list-todo" class="w-4 h-4"></i><span data-i18n="canvas.logs">日志</span></button>
                 </div>
             </div>
@@ -68,12 +69,20 @@
                         <div id="gateSubtitle" class="gate-subtitle">打开已有画布，或新建一个开始创作。</div>
                     </div>
                     <div class="gate-head-actions">
+                        <div id="gateSortSwitch" class="gate-sort" role="group" aria-label="排序方式">
+                            <button type="button" class="gate-sort-btn active" data-sort="recent" data-i18n="canvas.sortRecent">最近编辑</button>
+                            <button type="button" class="gate-sort-btn" data-sort="name" data-i18n="canvas.sortName">名称</button>
+                        </div>
                         <button id="gateRefreshBtn" class="gate-icon-btn" type="button" title="刷新列表" aria-label="刷新列表" data-i18n-title="canvas.refresh">
                             <i data-lucide="refresh-cw" class="w-4 h-4"></i>
                         </button>
                         <button id="gateTrashBtn" class="gate-icon-btn gate-trash-entry" type="button" title="打开回收站" aria-label="打开回收站" data-i18n-title="canvas.openTrash">
                             <i data-lucide="trash-2" class="w-4 h-4"></i>
                             <span id="gateTrashCount" class="gate-trash-badge">0</span>
+                        </button>
+                        <button id="gateAssetManagerBtn" class="gate-icon-btn gate-manager-btn" type="button" title="资产库管理" aria-label="资产库管理" hidden>
+                            <i data-lucide="library" class="w-4 h-4"></i>
+                            <span>素材库管理</span>
                         </button>
                         <button id="gateCreateBtn" class="primary-btn" type="button"><i data-lucide="plus" class="w-4 h-4"></i><span data-i18n="canvas.newCanvas">新建画布</span></button>
                         <button id="gateCreateSmartBtn" class="smart-create-btn" type="button"><i data-lucide="sparkles" class="w-4 h-4"></i><span data-i18n="canvas.newSmartCanvas">新建智能画布</span></button>
@@ -95,7 +104,7 @@
             <div id="selectionBox" class="selection-box"></div>
             <div id="selectionHub" class="selection-hub"></div>
             <div id="createMenu" class="create-menu">
-                <button class="menu-btn" onclick="menuAdd('image')"><i data-lucide="image-plus" class="w-4 h-4"></i><span data-i18n="canvas.imageCard">图片卡片</span></button>
+                <button class="menu-btn" onclick="menuAdd('image')"><i data-lucide="image-plus" class="w-4 h-4"></i><span data-i18n="canvas.imageCard">上传节点</span></button>
                 <button class="menu-btn" onclick="menuAdd('prompt')"><i data-lucide="text-cursor-input" class="w-4 h-4"></i><span data-i18n="canvas.prompt">提示词</span></button>
                 <button class="menu-btn" onclick="menuAdd('loop')"><i data-lucide="repeat-2" class="w-4 h-4"></i><span data-i18n="canvas.loopNode">循环节点</span></button>
                 <button class="menu-btn" onclick="menuAdd('llm')"><i data-lucide="message-square-text" class="w-4 h-4"></i><span data-i18n="canvas.llmNode">LLM 节点</span></button>
@@ -121,6 +130,24 @@
                     <div id="minimapViewport" class="minimap-viewport"></div>
                 </div>
             </div>
+            <aside id="canvasAssetPanel" class="canvas-asset-panel">
+                <div class="canvas-asset-head">
+                    <strong><i data-lucide="library" class="w-4 h-4"></i><span>资产库</span></strong>
+                    <button id="canvasAssetCloseBtn" class="canvas-asset-icon-btn" type="button" title="关闭"><i data-lucide="x" class="w-4 h-4"></i></button>
+                </div>
+                <select id="canvasAssetLibrarySelect" class="canvas-asset-select"></select>
+                <div class="canvas-asset-row">
+                    <select id="canvasAssetCategorySelect" class="canvas-asset-select"></select>
+                    <button id="canvasAssetAddCategoryBtn" class="canvas-asset-icon-btn" type="button" title="新建分组"><i data-lucide="folder-plus" class="w-4 h-4"></i></button>
+                </div>
+                <div id="canvasAssetDropZone" class="canvas-asset-drop">拖入图片或输出保存到当前分组</div>
+                <div id="canvasAssetGrid" class="canvas-asset-grid"></div>
+            </aside>
+            <div id="canvasAssetHoverPreview" class="canvas-asset-hover-preview" hidden>
+                <img alt="asset preview">
+                <video muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback" style="display:none"></video>
+                <div class="canvas-asset-hover-name"></div>
+            </div>
         </div>
         <div class="hint editor-only" data-i18n="canvas.hint">拖拽画布或按住滚轮移动，Ctrl 框选多选，拖动选中节点可一起移动。图片/提示词节点右下端口拖线到生成节点。</div>
         <div id="outputLightbox" class="output-lightbox" onclick="closeOutputLightbox()">
@@ -141,6 +168,7 @@
                     <div id="outputResolution" class="output-resolution">--</div>
                     <div class="output-preview-actions">
                         <button id="outputDownloadBtn" class="preview-icon-btn" type="button" title="下载" aria-label="下载" data-i18n-title="canvas.download"><i data-lucide="download" class="w-4 h-4"></i></button>
+                        <button id="outputDownloadAllBtn" class="preview-icon-btn" type="button" title="下载全部图片" aria-label="下载全部图片" data-i18n-title="canvas.outputDownloadAllImages" style="display:none"><i data-lucide="archive" class="w-4 h-4"></i></button>
                         <button class="preview-icon-btn" type="button" title="关闭" aria-label="关闭" onclick="closeOutputLightbox()" data-i18n-title="common.close"><i data-lucide="x" class="w-4 h-4"></i></button>
                     </div>
                 </div>
@@ -154,6 +182,24 @@
             </div>
             </div>
         </div>
+        <div id="promptTemplateModal" class="prompt-template-modal" onclick="closePromptTemplateModal()">
+            <div id="promptTemplatePanel" class="prompt-template-panel" onclick="event.stopPropagation()">
+                <div class="prompt-template-head">
+                    <div>
+                        <strong data-i18n="smart.promptTemplateLibrary">模板库</strong>
+                        <span data-i18n="canvas.promptTemplateSystem">系统提示词</span>
+                    </div>
+                    <button id="promptTemplateClose" type="button" title="关闭" aria-label="关闭" data-i18n-title="common.close"><i data-lucide="x"></i></button>
+                </div>
+                <select id="promptTemplateLibrarySelect" class="prompt-template-library-select" title="选择提示词库"></select>
+                <div class="prompt-template-search">
+                    <i data-lucide="search"></i>
+                    <input id="promptTemplateSearch" type="search" placeholder="搜索模板..." data-i18n-placeholder="canvas.promptTemplateSearch">
+                </div>
+                <div id="promptTemplateCats" class="prompt-template-cats"></div>
+                <div id="promptTemplateBody" class="prompt-template-body"></div>
+            </div>
+        </div>
         <div id="logModal" class="log-modal" onclick="closeCanvasLog()">
             <div class="log-panel" onclick="event.stopPropagation()">
                 <div class="log-head">
@@ -163,21 +209,40 @@
                 <div id="logList" class="log-list"></div>
             </div>
         </div>
+        <div id="assetManagerModal" class="asset-manager-modal" onclick="closeAssetManager()">
+            <div class="asset-manager-panel" onclick="event.stopPropagation()">
+                <div class="asset-manager-head">
+                    <div>
+                        <div class="asset-manager-title">资产库管理</div>
+                        <div class="asset-manager-sub">管理图片资产库和提示词库</div>
+                    </div>
+                    <button class="preview-icon-btn" type="button" onclick="closeAssetManager()" title="关闭"><i data-lucide="x" class="w-4 h-4"></i></button>
+                </div>
+                <div class="asset-manager-tabs">
+                    <button class="active" type="button" data-manager-tab="assets"><i data-lucide="image" class="w-4 h-4"></i><span>图片资产</span></button>
+                    <button type="button" data-manager-tab="prompts"><i data-lucide="text-cursor-input" class="w-4 h-4"></i><span>提示词库</span></button>
+                </div>
+                <div id="assetManagerBody" class="asset-manager-body"></div>
+            </div>
+        </div>
         <div id="imageEditModal" class="image-edit-modal" onclick="closeImageEditor()">
             <div class="image-edit-panel" onclick="event.stopPropagation()">
                 <div class="image-edit-head">
-                    <div>
+                    <div class="image-edit-headline">
                         <div id="imageEditTitle" class="image-edit-title" data-i18n="canvas.editImage">编辑图片</div>
                         <div id="imageEditSub" class="image-edit-sub" data-i18n="canvas.editImageSub">选择裁剪、遮罩或画笔模式</div>
                     </div>
                     <div class="image-edit-mode">
-                        <button type="button" data-image-edit-mode="crop" class="active"><i data-lucide="crop" class="w-3.5 h-3.5"></i><span data-i18n="canvas.modeCrop">裁剪</span></button>
+                        <button type="button" data-image-edit-mode="preview" class="active"><i data-lucide="eye" class="w-3.5 h-3.5"></i><span data-i18n="canvas.modePreview">预览</span></button>
+                        <button type="button" data-image-edit-mode="crop"><i data-lucide="crop" class="w-3.5 h-3.5"></i><span data-i18n="canvas.modeCrop">裁剪</span></button>
                         <button type="button" data-image-edit-mode="outpaint"><i data-lucide="expand" class="w-3.5 h-3.5"></i><span data-i18n="canvas.modeOutpaint">扩展</span></button>
                         <button type="button" data-image-edit-mode="mask"><i data-lucide="brush" class="w-3.5 h-3.5"></i><span data-i18n="canvas.modeMask">遮罩</span></button>
                         <button type="button" data-image-edit-mode="brush"><i data-lucide="paintbrush" class="w-3.5 h-3.5"></i><span data-i18n="canvas.modeBrush">画笔</span></button>
                         <button type="button" data-image-edit-mode="grid"><i data-lucide="grid-3x3" class="w-3.5 h-3.5"></i><span data-i18n="canvas.modeGrid">宫格切分</span></button>
                     </div>
-                    <button class="preview-icon-btn" type="button" onclick="closeImageEditor()" title="关闭" data-i18n-title="common.close"><i data-lucide="x" class="w-4 h-4"></i></button>
+                    <div class="image-edit-head-end">
+                        <button class="preview-icon-btn" type="button" onclick="closeImageEditor()" title="关闭" data-i18n-title="common.close"><i data-lucide="x" class="w-4 h-4"></i></button>
+                    </div>
                 </div>
                 <div id="imageMaskTools" class="image-edit-tools">
                     <label><span data-i18n="canvas.brushSize">笔刷</span> <input id="maskBrushSize" type="range" min="4" max="160" value="42"></label>
@@ -191,6 +256,7 @@
                     <button class="image-edit-btn secondary" type="button" data-brush-tool="rect" onclick="setBrushTool('rect')" title="矩形"><i data-lucide="square" class="w-4 h-4"></i></button>
                     <button class="image-edit-btn secondary" type="button" data-brush-tool="ellipse" onclick="setBrushTool('ellipse')" title="椭圆"><i data-lucide="circle" class="w-4 h-4"></i></button>
                     <button class="image-edit-btn secondary" type="button" data-brush-tool="label" onclick="setBrushTool('label')" title="数字标签"><i data-lucide="list-ordered" class="w-4 h-4"></i></button>
+                    <button class="image-edit-btn secondary" type="button" data-brush-tool="text" onclick="setBrushTool('text')" title="文字标签"><i data-lucide="type" class="w-4 h-4"></i></button>
                     <label><span data-i18n="canvas.color">颜色</span> <input id="paintBrushColor" type="color" value="#ff2d55"></label>
                     <label><span data-i18n="canvas.brushSize">笔刷</span> <input id="paintBrushSize" type="range" min="2" max="80" value="14"></label>
                     <button id="brushUndoBtn" class="image-edit-btn secondary" type="button" onclick="undoEditDrawing()" title="撤销"><i data-lucide="undo-2" class="w-4 h-4"></i></button>
@@ -226,6 +292,7 @@
                         <div id="cropCanvas" class="crop-canvas">
                             <img id="cropImage" alt="crop source">
                             <canvas id="editDrawCanvas" class="edit-draw-canvas"></canvas>
+                            <canvas id="editTextCanvas" class="edit-text-canvas"></canvas>
                             <div id="cropBox" class="crop-box">
                                 <div id="cropHandle" class="crop-handle"></div>
                             </div>
@@ -263,7 +330,7 @@
         </div>
     </div>
 
-    <script src="/static/js/ltx-director-timeline.js?v=2026.05.27.1"></script>
-    <script src="/static/js/canvas.js?v=2026.05.27.1"></script>
+    <script src="/static/js/ltx-director-timeline.js?v=2026.06.04"></script>
+    <script src="/static/js/canvas.js?v=2026.06.04"></script>
 </body>
 </html>

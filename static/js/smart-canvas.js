@@ -25,6 +25,7 @@ const selectionBox = document.getElementById('selectionBox');
 const assetToggle = document.getElementById('assetToggle');
 const assetPanel = document.getElementById('assetPanel');
 const assetCloseBtn = document.getElementById('assetCloseBtn');
+const assetLibrarySelect = document.getElementById('assetLibrarySelect');
 const assetCategorySelect = document.getElementById('assetCategorySelect');
 const assetGrid = document.getElementById('assetGrid');
 const assetDropZone = document.getElementById('assetDropZone');
@@ -46,6 +47,13 @@ const promptPresetApply = document.getElementById('promptPresetApply');
 const promptPresetDelete = document.getElementById('promptPresetDelete');
 const promptPresetNew = document.getElementById('promptPresetNew');
 const promptPresetSave = document.getElementById('promptPresetSave');
+const promptTemplatePanel = document.getElementById('promptTemplatePanel');
+const promptTemplateClose = document.getElementById('promptTemplateClose');
+const promptTemplateSearch = document.getElementById('promptTemplateSearch');
+const promptTemplateLibrarySelect = document.getElementById('promptTemplateLibrarySelect');
+const promptTemplateCats = document.getElementById('promptTemplateCats');
+const promptTemplateBody = document.getElementById('promptTemplateBody');
+const composerTemplateBtn = document.getElementById('composerTemplateBtn');
 let minimapViewport = document.getElementById('minimapViewport');
 let canvas = null;
 let nodes = [];
@@ -55,6 +63,7 @@ let selectedImage = {nodeId:'', index:-1};
 let dragState = null;
 let loopInsertPreview = null;
 let selectionState = null;
+let isRKeyDown = false;
 let selectionJustFinished = false;
 let resizeState = null;
 let thumbDragState = null;
@@ -72,10 +81,24 @@ let assetLibrary = {categories:[]};
 let assetLibraryOpen = false;
 let assetTab = 'image';
 let activeAssetCategoryId = '';
+let activeAssetLibraryId = '';
 let mentionSource = 'input';
 let mentionAssetCategoryId = '';
+let assetLibraryUpdatedAt = 0;
+let assetLibraryRefreshTimer = null;
 const PROMPT_PRESETS_KEY = 'smart_canvas_prompt_presets_v1';
+const PROMPT_TEMPLATE_GROUPS_KEY = 'smart_canvas_prompt_template_groups_v1';
+const PROMPT_TEMPLATE_OVERRIDES_KEY = 'smart_canvas_prompt_template_overrides_v1';
 let promptPresets = [];
+let builtinPromptTemplates = [];
+let promptLibraries = [];
+let activePromptLibraryId = 'system';
+let promptTemplateGroups = [];
+let promptTemplateOverrides = {hiddenBuiltinIds:[], editedBuiltins:{}};
+let promptTemplateCategory = 'all';
+let promptTemplateSelectedId = '';
+let promptTemplateEditing = false;
+let promptTemplateGroupEditMode = false;
 let promptPresetDeleteArmed = false;
 let createMenuPoint = {x:0, y:0};
 let nodeClipboard = null;
@@ -89,9 +112,12 @@ let zoomPreviewState = null;
 let runTimerInterval = null;
 let smartCascadeRunning = false;
 let smartCascadeActiveLoopId = '';
+let smartCascadeStopRequested = false;
 let smartCascadeSilentSelection = false;
 let smartCascadeRunPath = null;
+const smartCascadeRuns = new Map();
 let smartLoopContext = null;
+let transientSmartCloudLinks = [];
 let runBtnCooldownToken = 0;
 let smartRunStateToken = 0;
 const activeSmartTaskPolls = new Map();
@@ -106,6 +132,30 @@ const undoStack = [];
 let undoSuppressed = false;
 let pendingUndoSnapshot = null;
 let runningHubWorkflowCache = {};
+function activeSmartCascadeCount(){ return smartCascadeRuns.size; }
+function smartCascadeRunForLoop(loopId){ return loopId ? smartCascadeRuns.get(loopId) || null : null; }
+function smartCascadeIsLoopRunning(loopId){ return Boolean(smartCascadeRunForLoop(loopId)); }
+function syncSmartCascadeLegacyState(preferredLoopId=''){
+    const activeIds = [...smartCascadeRuns.keys()];
+    smartCascadeRunning = activeIds.length > 0;
+    smartCascadeActiveLoopId = preferredLoopId && smartCascadeRuns.has(preferredLoopId)
+        ? preferredLoopId
+        : (activeIds[0] || '');
+    const activeRun = smartCascadeActiveLoopId ? smartCascadeRuns.get(smartCascadeActiveLoopId) : null;
+    smartCascadeStopRequested = Boolean(activeRun?.stopRequested);
+    smartCascadeRunPath = activeRun?.runPath || null;
+}
+function smartCascadeAnyRunning(){ return smartCascadeRunning || activeSmartCascadeCount() > 0; }
+function smartCascadeEdgeState(edgeKey){
+    for(const run of smartCascadeRuns.values()){
+        const state = run?.runPath?.states?.[edgeKey];
+        if(state) return state;
+    }
+    return smartCascadeRunPath?.states?.[edgeKey] || '';
+}
+function smartCascadePathForCtx(ctx=null){
+    return ctx?.runState?.runPath || ctx?.runPath || smartCascadeRunPath;
+}
 function capturePendingUndo(){ pendingUndoSnapshot = snapshotForUndo(); }
 function commitPendingUndo(){
     if(pendingUndoSnapshot){
@@ -152,6 +202,11 @@ let cropDrag = null;
 let imageEditMode = 'crop';
 let imageEditModeTouched = false;
 let editDrawState = null;
+let editTextItems = [];
+let editTextSelectedId = '';
+let editTextDrag = null;
+let editTextDirty = false;
+let editTextInlineEditor = null;
 let editDrawUndoStack = [];
 let editDrawRedoStack = [];
 const EDIT_DRAW_HISTORY_MAX = 40;
@@ -172,6 +227,40 @@ let previewCompareDrag = false;
 let previewComparePos = 50;
 let imageEditPanDrag = null;
 let previewNavState = {nodeId:'', index:0, count:0};
+const PANORAMA_RATIO_PRESETS = {
+    square:{w:1, h:1},
+    portrait:{w:2, h:3},
+    landscape:{w:3, h:2},
+    portrait43:{w:3, h:4},
+    landscape43:{w:4, h:3},
+    story:{w:9, h:16},
+    wide:{w:16, h:9},
+    ultrawide:{w:21, h:9},
+    ultratall:{w:9, h:21}
+};
+let panoramaState = {
+    enabled:false,
+    ratio:'wide',
+    customW:16,
+    customH:9,
+    fov:75,
+    yaw:0,
+    pitch:0,
+    drag:null,
+    three:null,
+    renderer:null,
+    scene:null,
+    camera:null,
+    sphere:null,
+    texture:null,
+    threeLoadPromise:null,
+    image:null,
+    ctx:null,
+    animationId:0,
+    loadedSrc:'',
+    loadToken:0
+};
+window.__smartCanvasPanoramaState = panoramaState;
 let viewport = {x:0, y:0, scale:1};
 let settings = {
     engine:'api',
@@ -198,7 +287,10 @@ let settings = {
     videoWatermark:false,
     videoCameraFixed:false,
     videoGenerateAudio:false,
+    videoMultimodal:false,
     videoUseFrameRoles:false,
+    videoTrustedAsset:false,
+    videoTrustedSource:'library',
     videoTempShLinks:[],
     msgenModel:'zimage',
     msCustomModel:'',
@@ -234,13 +326,15 @@ const MS_GEN_MODELS = {
     custom: { label:tr('smart.custom') || '自定义', modelId:'', acceptsImage:true, endpoint:'/api/ms/generate' }
 };
 const SIZE_MAP = {
-    square: {'1k':'1024x1024','2k':'2048x2048','4k':'2048x2048'},
+    square: {'1k':'1024x1024','2k':'2048x2048','4k':'4096x4096'},
     landscape: {'1k':'1536x1024','2k':'2048x1360','4k':'3520x2336'},
     portrait: {'1k':'1024x1536','2k':'1360x2048','4k':'2336x3520'},
     landscape43: {'1k':'1024x768','2k':'2048x1536','4k':'3312x2480'},
     portrait43: {'1k':'768x1024','2k':'1536x2048','4k':'2480x3312'},
     wide: {'1k':'1536x864','2k':'2048x1152','4k':'3840x2160'},
-    story: {'1k':'864x1536','2k':'1152x2048','4k':'2160x3840'}
+    story: {'1k':'864x1536','2k':'1152x2048','4k':'2160x3840'},
+    ultrawide: {'1k':'1536x656','2k':'2048x880','4k':'3840x1648'},
+    ultratall: {'1k':'656x1536','2k':'880x2048','4k':'1648x3840'}
 };
 const RES_LONG_SIDE = { '1k':1024, '2k':2048, '4k':3840 };
 const RES_PIXEL_LIMIT = { '1k':2359296, '2k':4194304, '4k':8294400 };
@@ -259,13 +353,40 @@ function cloneSmartSettings(source=settings){
         return {...(source || {})};
     }
 }
+function settingsForStorage(source=settings){
+    const clean = cloneSmartSettings(source);
+    clean.videoTempShLinks = (clean.videoTempShLinks || []).filter(item => item?.manual === true);
+    return clean;
+}
+function isApiLikeEngine(engine){
+    return ['api', 'volcengine'].includes(String(engine || '').toLowerCase());
+}
+function mediaItemForStorage(item){
+    if(!item || typeof item !== 'object') return item;
+    const clean = {...item};
+    delete clean.cloudUrl;
+    delete clean.uploadedUrl;
+    delete clean.originalRemoteUrl;
+    delete clean.tempCloudUrl;
+    return clean;
+}
+function canvasForStorage(){
+    const clean = JSON.parse(JSON.stringify(canvas || {}));
+    clean.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
+    (clean.nodes || []).forEach(node => {
+        if(Array.isArray(node.images)) node.images = node.images.map(mediaItemForStorage);
+        if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
+    });
+    return clean;
+}
 const RECENT_SMART_SETTINGS_KEY = 'smart_canvas_recent_run_settings_v1';
 const initialSmartSettings = cloneSmartSettings(settings);
 let canvasDefaultSmartSettings = cloneSmartSettings(settings);
 let recentSmartSettingsByMode = {};
 function smartSettingsModeKey(source=settings){
-    const engine = ['api','modelscope','comfy','runninghub'].includes(source?.engine) ? source.engine : 'api';
+    const engine = ['api','volcengine','modelscope','comfy','runninghub'].includes(source?.engine) ? source.engine : 'api';
     if(engine === 'api') return `api:${source?.apiKind === 'video' ? 'video' : 'image'}`;
+    if(engine === 'volcengine') return `volcengine:${source?.apiKind === 'video' ? 'video' : 'image'}`;
     if(engine === 'comfy') return `comfy:${['text','enhance','edit','custom'].includes(source?.comfyMode) ? source.comfyMode : 'text'}`;
     if(engine === 'runninghub') return 'runninghub';
     return 'modelscope';
@@ -287,7 +408,8 @@ function recentSmartSettingsForMode(modeKey=''){
     return saved && typeof saved === 'object' ? cloneSmartSettings(saved) : {};
 }
 function rememberRecentSmartSettings(source=settings, node=null){
-    const clean = stripOutpaintDisplaySettings(source, node);
+    const clean = stripOutpaintDisplaySettings(settingsForStorage(source), node);
+    sanitizeSmartApiSelection(clean);
     if(clean.outpaintResolutionLocked === true && clean.resolution === 'custom'){
         clean.resolution = '1k';
         clean.ratio = clean.ratio || 'square';
@@ -297,15 +419,32 @@ function rememberRecentSmartSettings(source=settings, node=null){
     }
     delete clean.outpaintResolutionLocked;
     const key = smartSettingsModeKey(clean);
-    recentSmartSettingsByMode[key] = cloneSmartSettings(clean);
+    recentSmartSettingsByMode[key] = settingsForStorage(clean);
     recentSmartSettingsByMode.__lastKey = key;
     saveRecentSmartSettings();
 }
 function applyRecentSmartSettingsForCurrentMode(){
+    const requestedEngine = ['api','volcengine','modelscope','comfy','runninghub'].includes(settings.engine) ? settings.engine : 'api';
+    const requestedApiKind = settings.apiKind === 'video' ? 'video' : 'image';
     const key = smartSettingsModeKey(settings);
     const saved = recentSmartSettingsForMode(key);
-    if(!Object.keys(saved).length) return;
-    settings = {...settings, ...saved};
+    if(!Object.keys(saved).length){
+        settings.engine = requestedEngine;
+        if(isApiLikeEngine(requestedEngine)) settings.apiKind = requestedApiKind;
+        clearVolcengineSelectionOutsideVolcengine(settings);
+        sanitizeSmartApiSelection(settings);
+        return;
+    }
+    settings = {...settings, ...saved, engine:requestedEngine};
+    if(isApiLikeEngine(requestedEngine)) settings.apiKind = requestedApiKind;
+    clearVolcengineSelectionOutsideVolcengine(settings);
+    sanitizeSmartApiSelection(settings);
+}
+function clearVolcengineSelectionOutsideVolcengine(target=settings){
+    if(!target || typeof target !== 'object' || target.engine === 'volcengine') return target;
+    if(target.provider_id === 'volcengine') target.provider_id = '';
+    if(target.videoProvider === 'volcengine') target.videoProvider = '';
+    return target;
 }
 function isSmartImageNode(node){
     return Boolean(node && (node.type === 'smart-image' || !node.type));
@@ -342,7 +481,7 @@ function normalizeLegacySmartNode(node){
         const normalized = {
             ...node,
             type:'smart-image',
-            title:images.length > 1 ? 'Group' : (images.length ? 'Image' : '上传卡片'),
+            title:images.length > 1 ? 'Group' : (images.length ? 'Image' : tr('smart.createImportNode')),
             images
         };
         delete normalized.imageMode;
@@ -386,10 +525,9 @@ function exceedsFourKStandard(width, height){
 function withOutpaintDisplaySettings(node, baseSettings){
     const size = validOutpaintSize(node);
     if(!size) return baseSettings;
-    return {
+    const engine = ['api','volcengine','modelscope','comfy','runninghub'].includes(baseSettings?.engine) ? baseSettings.engine : 'api';
+    const next = {
         ...baseSettings,
-        engine:'api',
-        apiKind:'image',
         resolution:'custom',
         ratio:'',
         customWidth:size.width,
@@ -397,6 +535,19 @@ function withOutpaintDisplaySettings(node, baseSettings){
         customSize:`${size.width}x${size.height}`,
         outpaintResolutionLocked:true
     };
+    if(isApiLikeEngine(engine)) next.apiKind = 'image';
+    if(engine === 'modelscope'){
+        next.msResolution = 'custom';
+        next.msRatio = '';
+        next.msCustomWidth = size.width;
+        next.msCustomHeight = size.height;
+        next.msCustomSize = `${size.width}x${size.height}`;
+    }
+    if(engine === 'comfy'){
+        next.width = size.width;
+        next.height = size.height;
+    }
+    return next;
 }
 function stripOutpaintDisplaySettings(settingsObj, node=null){
     const clean = cloneSmartSettings(settingsObj);
@@ -408,6 +559,18 @@ function stripOutpaintDisplaySettings(settingsObj, node=null){
         clean.customWidth = '';
         clean.customHeight = '';
         clean.customSize = '';
+    }
+    const matchesMsOutpaintSize = size && clean.msResolution === 'custom' && String(clean.msCustomSize || '') === `${size.width}x${size.height}`;
+    if(matchesMsOutpaintSize){
+        clean.msResolution = '1k';
+        clean.msRatio = clean.msRatio || 'square';
+        clean.msCustomWidth = '';
+        clean.msCustomHeight = '';
+        clean.msCustomSize = '';
+    }
+    if(size && Number(clean.width) === size.width && Number(clean.height) === size.height){
+        clean.width = 1024;
+        clean.height = 1024;
     }
     delete clean.outpaintResolutionLocked;
     return clean;
@@ -438,7 +601,7 @@ function persistActiveSmartSettings(){
     if(!composer?.classList?.contains('open')) return;
     const subject = activeComposerNode();
     if(!subject) return;
-    subject.runSettings = cloneSmartSettings(settings);
+    subject.runSettings = settingsForStorage(settings);
     rememberRecentSmartSettings(settings, subject);
 }
 function backToCanvasList(){ savePromptDraftForCurrent(); window.location.href = '/static/canvas.html?v=2026.05.22.1'; }
@@ -833,12 +996,44 @@ function exitZoomPreview(point=null){
     scheduleSave();
     return true;
 }
+function exitZoomPreviewToNode(nodeId){
+    if(!zoomPreviewState) return false;
+    const node = nodes.find(n => n.id === nodeId);
+    if(!node) return exitZoomPreview();
+    const prev = zoomPreviewState;
+    const rect = nodeRect(node);
+    const cx = rect.x + rect.width / 2;
+    const cy = rect.y + rect.height / 2;
+    const fitScale = Math.min(
+        1.15,
+        (shell.clientWidth - 160) / Math.max(1, rect.width),
+        (shell.clientHeight - 160) / Math.max(1, rect.height)
+    );
+    const readableScale = Math.min(1.15, Math.max(0.72, fitScale));
+    zoomPreviewState = null;
+    shell.classList.remove('zoom-preview');
+    viewport.scale = Math.max(safeScale(prev.scale), readableScale);
+    viewport.x = shell.clientWidth / 2 - cx * viewport.scale;
+    viewport.y = shell.clientHeight / 2 - cy * viewport.scale;
+    applyViewport();
+    scheduleSave();
+    return true;
+}
 function toggleZoomPreview(){
     if(zoomPreviewState) exitZoomPreview();
     else enterZoomPreview();
 }
 function imageProviders(){
-    return (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'modelscope' && p.id !== 'runninghub' && (p.image_models || []).length);
+    return (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'modelscope' && p.id !== 'runninghub' && p.id !== 'volcengine' && (p.image_models || []).length);
+}
+function volcengineProvider(){
+    return (apiProviders || []).find(p => p.id === 'volcengine' && p.enabled !== false) || {
+        id:'volcengine',
+        name:'火山引擎',
+        image_models:[],
+        video_models:DEFAULT_VIDEO_MODELS,
+        enabled:true
+    };
 }
 function runningHubProvider(){
     return (apiProviders || []).find(p => p.id === 'runninghub' && p.enabled !== false) || null;
@@ -869,12 +1064,13 @@ function runningHubAllEntries(){
         ...runningHubEntries('workflow').map(entry => ({kind:'workflow', id:runningHubEntryId(entry, 'workflow'), entry})).filter(x => x.id)
     ];
 }
-function selectedRunningHubRef(){
+function selectedRunningHubRef(sourceSettings=settings){
     const all = runningHubAllEntries();
-    const parsed = parseRunningHubEntryKey(settings.rhConfigKey || '');
+    sourceSettings = sourceSettings || settings;
+    const parsed = parseRunningHubEntryKey(sourceSettings.rhConfigKey || '');
     let ref = parsed ? all.find(item => item.kind === parsed.kind && item.id === parsed.id) : null;
     if(!ref && all.length) ref = all[0];
-    if(ref) settings.rhConfigKey = runningHubEntryKey(ref.kind, ref.id);
+    if(ref && sourceSettings === settings) settings.rhConfigKey = runningHubEntryKey(ref.kind, ref.id);
     return ref || null;
 }
 function rhEntryFields(entry){
@@ -886,11 +1082,11 @@ function rhWorkflowJsonFromSources(...sources){
     }
     return {};
 }
-function rhCurrentKind(){
-    return selectedRunningHubRef()?.kind || 'app';
+function rhCurrentKind(sourceSettings=settings){
+    return selectedRunningHubRef(sourceSettings)?.kind || 'app';
 }
-function rhActiveFields(){
-    const ref = selectedRunningHubRef();
+function rhActiveFields(sourceSettings=settings){
+    const ref = selectedRunningHubRef(sourceSettings);
     let fields = rhEntryFields(ref?.entry);
     if(ref?.kind === 'workflow'){
         const cached = runningHubWorkflowCache[ref.id];
@@ -939,10 +1135,110 @@ function chatModelOptions(selectedModel='', providerId=''){
     return [...new Set([selected, ...models].filter(Boolean))].map(model => `<option value="${escapeHtml(model)}" ${model === selected ? 'selected' : ''}>${escapeHtml(model)}</option>`).join('');
 }
 function apiProviderById(providerId){
+    if(providerId === 'volcengine') return volcengineProvider();
     return (apiProviders || []).find(p => p.id === providerId) || imageProviders()[0] || null;
 }
+// 认证素材 asset:// 是平台绑定的：返回某 provider 所属的认证平台键（与后端一致）
+function videoProviderPlatform(providerId){
+    const p = (apiProviders || []).find(x => x.id === providerId);
+    const proto = String(p?.protocol || '').toLowerCase();
+    const base = String(p?.base_url || '').toLowerCase();
+    if(proto === 'apimart' || base.includes('apimart.ai')) return 'apimart';
+    if(proto === 'volcengine' || providerId === 'volcengine') return 'volcengine';
+    return '';
+}
 function providerImageModels(providerId){
+    if(providerId === 'volcengine') return volcengineProvider().image_models || [];
     return (apiProviders || []).find(p => p.id === providerId)?.image_models || [];
+}
+// 即梦图生图（挂了参考图）不支持 3.0/3.1，此时从模型下拉里隐藏它们。
+const JIMENG_IMAGE2IMAGE_UNSUPPORTED = ['3.0', '3.1'];
+function jimengImageEditMode(){
+    if(settings.provider_id !== 'jimeng') return false;
+    const node = activeComposerNode() || selectedNode();
+    const refs = node ? visibleReferenceImagesFor(node) : [];
+    return refs.length > 0;
+}
+function filterJimengImageModels(models){
+    if(settings.provider_id !== 'jimeng' || !jimengImageEditMode()) return models;
+    return (models || []).filter(m => !JIMENG_IMAGE2IMAGE_UNSUPPORTED.includes(String(m)));
+}
+let _jimengLastEditMode = null;
+let _jimengModelRefreshing = false;
+// 参考图增删导致即梦文生图/图生图切换时，重新渲染参数面板以更新模型下拉。
+function syncJimengModelPillForRefs(){
+    if(_jimengModelRefreshing) return;
+    if(settings.provider_id !== 'jimeng' || settings.engine !== 'api' || settings.apiKind === 'video'){
+        _jimengLastEditMode = null;
+        return;
+    }
+    const mode = jimengImageEditMode();
+    if(mode === _jimengLastEditMode) return;
+    _jimengLastEditMode = mode;
+    _jimengModelRefreshing = true;
+    try { renderDynamicParams(); } finally { _jimengModelRefreshing = false; }
+}
+// 即梦各视频指令支持的模型集合不同，按当前参考素材推断指令并过滤模型下拉。
+const JIMENG_SEEDANCE_VIDEO_MODELS = ['seedance2.0_vip', 'seedance2.0fast_vip', 'seedance2.0', 'seedance2.0fast'];
+const JIMENG_VIDEO_MODELS_BY_COMMAND = {
+    text2video: JIMENG_SEEDANCE_VIDEO_MODELS,
+    multimodal2video: JIMENG_SEEDANCE_VIDEO_MODELS,
+    image2video: ['3.0', '3.0fast', '3.0pro', '3.5pro', ...JIMENG_SEEDANCE_VIDEO_MODELS],
+    frames2video: ['3.0', '3.5pro', ...JIMENG_SEEDANCE_VIDEO_MODELS],
+};
+function jimengVideoCommand(){
+    const node = activeComposerNode() || selectedNode();
+    const refs = node ? visibleReferenceImagesFor(node) : [];
+    const imageRefs = imageRefsOnly(refs);
+    const hasVideoRef = videoRefsOnly(refs).length > 0 || Boolean(manualSmartVideoLink(settings));
+    if(settings.videoMultimodal || hasVideoRef) return 'multimodal2video';
+    if(imageRefs.length >= 2) return settings.videoUseFrameRoles ? 'frames2video' : 'multiframe2video';
+    if(imageRefs.length >= 1) return 'image2video';
+    return 'text2video';
+}
+function filterJimengVideoModels(models){
+    if(settings.videoProvider !== 'jimeng') return models;
+    const allowed = JIMENG_VIDEO_MODELS_BY_COMMAND[jimengVideoCommand()];
+    if(!allowed) return models; // multiframe2video 等：官方规格未知，不过滤
+    return (models || []).filter(m => allowed.includes(String(m)));
+}
+let _jimengLastVideoCommand = null;
+function syncJimengVideoModelPillForRefs(){
+    if(_jimengModelRefreshing) return;
+    if(settings.videoProvider !== 'jimeng' || settings.engine !== 'api' || settings.apiKind !== 'video'){
+        _jimengLastVideoCommand = null;
+        return;
+    }
+    const command = jimengVideoCommand();
+    if(command === _jimengLastVideoCommand) return;
+    _jimengLastVideoCommand = command;
+    _jimengModelRefreshing = true;
+    try { renderDynamicParams(); } finally { _jimengModelRefreshing = false; }
+}
+function sanitizeSmartApiSelection(target=settings){
+    if(!target || typeof target !== 'object') return target;
+    if(target.engine === 'volcengine'){
+        if(target.apiKind === 'video'){
+            target.videoProvider = 'volcengine';
+            const models = volcengineVideoModels();
+            if(!models.includes(target.videoModel)) target.videoModel = models[0] || '';
+        } else {
+            target.provider_id = 'volcengine';
+            const models = providerImageModels('volcengine');
+            if(!models.includes(target.model)) target.model = models[0] || '';
+        }
+        return target;
+    }
+    clearVolcengineSelectionOutsideVolcengine(target);
+    if(target.provider_id){
+        const models = providerImageModels(target.provider_id);
+        if(models.length && !models.includes(target.model)) target.model = models[0] || '';
+    }
+    if(target.videoProvider){
+        const models = providerVideoModels(target.videoProvider);
+        if(models.length && !models.includes(target.videoModel)) target.videoModel = models[0] || '';
+    }
+    return target;
 }
 function modelscopeProvider(){
     return (apiProviders || []).find(p => p.id === 'modelscope' && p.enabled !== false) || null;
@@ -952,20 +1248,26 @@ function modelscopeImageModels(){
 }
 const DEFAULT_VIDEO_MODELS = ['veo3-fast','veo3','sora','runway','kling','pika','minimax-video','wan-v2','seedance-1.0-pro','jimeng-vide-3.0','jimeng-video-3.0-pro'];
 function videoApiProviders(){
-    const fromConfig = (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'runninghub' && (p.video_models || []).length);
+    const fromConfig = (apiProviders || []).filter(p => p.enabled !== false && p.id !== 'runninghub' && p.id !== 'volcengine' && (p.video_models || []).length);
     if(fromConfig.length) return fromConfig;
     return [{id:'comfly', name:'Comfly', video_models:DEFAULT_VIDEO_MODELS, enabled:true}];
 }
 function videoProviderById(providerId){
+    if(providerId === 'volcengine') return volcengineProvider();
     return videoApiProviders().find(p => p.id === providerId) || videoApiProviders()[0] || null;
 }
 function providerVideoModels(providerId){
+    if(providerId === 'volcengine') return volcengineVideoModels();
     const provider = videoApiProviders().find(p => p.id === providerId);
     const models = provider?.video_models || DEFAULT_VIDEO_MODELS;
     return [...new Set(models)];
 }
+function volcengineVideoModels(){
+    const provider = (apiProviders || []).find(p => p.id === 'volcengine');
+    return [...new Set(provider?.video_models || DEFAULT_VIDEO_MODELS)];
+}
 function renderVideoProviderControl(providers){
-    const current = videoProviderById(settings.videoProvider);
+    const current = (providers || []).find(p => p.id === settings.videoProvider) || videoProviderById(settings.videoProvider);
     return `<div class="smart-control provider-control">
         <button class="smart-pill" type="button"><i data-lucide="plug-zap"></i><span class="sub">${escapeHtml(current?.name || settings.videoProvider || tr('smart.platform'))}</span></button>
         <div class="smart-popover compact-popover">
@@ -1022,7 +1324,7 @@ function renderVideoAspectControl(){
     </div>`;
 }
 function renderVideoResolutionControl(){
-    const options = [['', tr('smart.videoResAuto')], ['480p','480P'], ['720p','720P'], ['1080p','1080P'], ['780P','780P']];
+    const options = [['', tr('smart.videoResAuto')], ['480p','480P'], ['720p','720P'], ['1080p','1080P']];
     const value = settings.videoResolution || '';
     const labelMap = Object.fromEntries(options);
     return `<div class="smart-control resolution-control">
@@ -1040,10 +1342,23 @@ function renderVideoToggleControl(key, label){
     return `<button type="button" class="setting-check ${on ? 'active' : ''}" data-toggle-param="${escapeHtml(key)}"><span class="check-box"></span><span>${escapeHtml(label)}</span></button>`;
 }
 function renderTempShUploadControl(){
-    return `<button type="button" class="smart-pill cloud-upload-pill" data-temp-sh-upload-video title="上传当前输入视频到云端直链"><i data-lucide="upload-cloud"></i><span>上传云端</span></button>`;
+    return `<button type="button" class="smart-pill cloud-upload-pill" data-temp-sh-upload-video title="上传当前输入图片或视频到云端直链"><i data-lucide="upload-cloud"></i><span>上传云端</span></button>`;
 }
 function renderManualVideoUrlControl(){
-    return `<button type="button" class="smart-pill manual-video-url-pill" data-manual-video-url title="手动输入视频 URL"><i data-lucide="link"></i><span>输入网址</span></button>`;
+    return `<button type="button" class="smart-pill manual-video-url-pill" data-manual-video-url title="手动输入媒体 URL"><i data-lucide="link"></i><span>输入网址</span></button>`;
+}
+// 可信素材模式：打开后可选择素材来源——素材库认证链接 / 自行上传云端 / 自行输入网址。
+function renderVideoTrustedAssetControl(){
+    const on = !!settings.videoTrustedAsset;
+    let html = renderVideoToggleControl('videoTrustedAsset', tr('smart.videoTrustedAsset'));
+    if(!on) return html;
+    const src = ['library','cloud','manual'].includes(settings.videoTrustedSource) ? settings.videoTrustedSource : 'library';
+    html += `<div class="trusted-source-row">
+        <button type="button" class="smart-pill trusted-src-pill ${src === 'library' ? 'active' : ''}" data-trusted-source="library" title="使用素材库中已注册的认证素材链接（asset://）"><i data-lucide="library"></i><span>素材库链接</span></button>
+        <button type="button" class="smart-pill trusted-src-pill ${src === 'cloud' ? 'active' : ''}" data-trusted-source="cloud" title="把当前输入图片/视频上传到云端直链"><i data-lucide="upload-cloud"></i><span>上传云端</span></button>
+        <button type="button" class="smart-pill trusted-src-pill ${src === 'manual' ? 'active' : ''}" data-trusted-source="manual" title="手动输入媒体 URL 或 asset:// 地址"><i data-lucide="link"></i><span>输入网址</span></button>
+    </div>`;
+    return html;
 }
 function optionHtml(value, label, selected){
     return `<option value="${escapeHtml(value)}" ${String(value) === String(selected) ? 'selected' : ''}>${escapeHtml(label ?? value)}</option>`;
@@ -1100,13 +1415,18 @@ function comfyParamValue(field){
 function updateProviderModels(){ renderDynamicParams(); }
 function renderDynamicParams(){
     if(!dynamicParams) return;
-    settings.engine = ['api','modelscope','comfy','runninghub'].includes(settings.engine) ? settings.engine : 'api';
+    settings.engine = ['api','volcengine','modelscope','comfy','runninghub'].includes(settings.engine) ? settings.engine : 'api';
     settings.apiKind = settings.apiKind === 'video' ? 'video' : 'image';
+    clearVolcengineSelectionOutsideVolcengine(settings);
     engineSelect.value = settings.engine;
     syncApiKindToggleVisibility();
     if(settings.engine === 'api'){
         if(settings.apiKind === 'video') renderApiVideoParams();
         else renderApiParams();
+    }
+    else if(settings.engine === 'volcengine'){
+        if(settings.apiKind === 'video') renderVolcengineVideoParams();
+        else renderVolcengineParams();
     }
     else if(settings.engine === 'modelscope') renderMsParams();
     else if(settings.engine === 'runninghub') renderRunningHubParams();
@@ -1119,7 +1439,7 @@ function renderDynamicParams(){
 function renderApiParams(){
     const providers = imageProviders();
     if(!settings.provider_id || !providers.some(p => p.id === settings.provider_id)) settings.provider_id = providers[0]?.id || '';
-    const models = providerImageModels(settings.provider_id);
+    const models = filterJimengImageModels(providerImageModels(settings.provider_id));
     if(!settings.model || !models.includes(settings.model)) settings.model = models[0] || '';
     normalizeApiSizeSettings('');
     const outpaintLocked = settings.outpaintResolutionLocked === true;
@@ -1137,7 +1457,7 @@ function renderApiParams(){
 function renderApiVideoParams(){
     const providers = videoApiProviders();
     if(!settings.videoProvider || !providers.some(p => p.id === settings.videoProvider)) settings.videoProvider = providers[0]?.id || 'comfly';
-    const models = providerVideoModels(settings.videoProvider);
+    const models = filterJimengVideoModels(providerVideoModels(settings.videoProvider));
     if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || 'veo3-fast';
     dynamicParams.innerHTML = `
         ${renderVideoProviderControl(providers)}
@@ -1150,7 +1470,50 @@ function renderApiVideoParams(){
         ${renderVideoToggleControl('videoGenerateAudio', tr('smart.videoGenerateAudio'))}
         ${renderVideoToggleControl('videoCameraFixed', tr('smart.videoCameraFixed'))}
         ${renderVideoToggleControl('videoWatermark', tr('smart.videoWatermark'))}
+        ${renderVideoToggleControl('videoMultimodal', tr('smart.videoMultimodal'))}
         ${renderVideoToggleControl('videoUseFrameRoles', tr('smart.videoUseFrameRoles'))}
+        ${settings.videoProvider === 'jimeng' ? '' : renderVideoTrustedAssetControl()}
+    `;
+}
+function renderVolcengineParams(){
+    const provider = volcengineProvider();
+    const providers = [provider];
+    const models = providerImageModels('volcengine');
+    settings.provider_id = 'volcengine';
+    if(!settings.model || !models.includes(settings.model)) settings.model = models[0] || '';
+    normalizeApiSizeSettings('');
+    const outpaintLocked = settings.outpaintResolutionLocked === true;
+    dynamicParams.innerHTML = `
+        ${renderProviderControl(providers)}
+        ${renderModelControl(models)}
+        ${renderResolutionControl('')}
+        ${outpaintLocked ? '' : renderRatioControl('', true)}
+        ${outpaintLocked ? '' : renderInlineCustomSizeFields('')}
+        ${outpaintLocked ? '' : renderInlineCustomRatioFields('')}
+        ${renderQualityControl()}
+        ${renderCountVisualControl()}
+    `;
+}
+function renderVolcengineVideoParams(){
+    const provider = volcengineProvider();
+    const providers = [provider];
+    const models = volcengineVideoModels();
+    settings.videoProvider = 'volcengine';
+    if(!settings.videoModel || !models.includes(settings.videoModel)) settings.videoModel = models[0] || 'seedance-1.0-pro';
+    dynamicParams.innerHTML = `
+        ${renderVideoProviderControl(providers)}
+        ${renderVideoModelControl(models)}
+        ${renderVideoResolutionControl()}
+        ${renderVideoAspectControl()}
+        ${renderVideoDurationControl()}
+        ${renderVideoToggleControl('videoEnhancePrompt', tr('smart.videoEnhancePrompt'))}
+        ${renderVideoToggleControl('videoEnableUpsample', tr('smart.videoUpsample'))}
+        ${renderVideoToggleControl('videoGenerateAudio', tr('smart.videoGenerateAudio'))}
+        ${renderVideoToggleControl('videoCameraFixed', tr('smart.videoCameraFixed'))}
+        ${renderVideoToggleControl('videoWatermark', tr('smart.videoWatermark'))}
+        ${renderVideoToggleControl('videoMultimodal', tr('smart.videoMultimodal'))}
+        ${renderVideoToggleControl('videoUseFrameRoles', tr('smart.videoUseFrameRoles'))}
+        ${renderVideoTrustedAssetControl()}
     `;
 }
 function renderRunningHubParams(){
@@ -1308,7 +1671,7 @@ function renderSizeControls(prefix='', includeSource=false){
     const ratioKey = prefix ? `${prefix}Ratio` : 'ratio';
     const resKey = prefix ? `${prefix}Resolution` : 'resolution';
     const ratios = [
-        ['square','1:1'], ['portrait','2:3'], ['landscape','3:2'], ['portrait43','3:4'], ['landscape43','4:3'], ['story','9:16'], ['wide','16:9'],
+        ['square','1:1'], ['portrait','2:3'], ['landscape','3:2'], ['portrait43','3:4'], ['landscape43','4:3'], ['story','9:16'], ['wide','16:9'], ['ultrawide','21:9'], ['ultratall','9:21'],
         ...(includeSource ? [['source', tr('canvas.adaptiveRatio') || '适配比例']] : []),
         ['custom', tr('canvas.custom') || '自定义']
     ];
@@ -1323,7 +1686,7 @@ function ratioLabel(prefix=''){
     const ratioKey = prefix ? `${prefix}Ratio` : 'ratio';
     const customKey = prefix ? `${prefix}CustomRatio` : 'customRatio';
     const sourceLabel = sourceImageRatioLabel(prefix) || tr('smart.imageRatio');
-    const map = {square:'1:1', portrait:'2:3', landscape:'3:2', portrait43:'3:4', landscape43:'4:3', story:'9:16', wide:'16:9', source:sourceLabel, custom:settings[customKey] || tr('smart.custom')};
+    const map = {square:'1:1', portrait:'2:3', landscape:'3:2', portrait43:'3:4', landscape43:'4:3', story:'9:16', wide:'16:9', ultrawide:'21:9', ultratall:'9:21', source:sourceLabel, custom:settings[customKey] || tr('smart.custom')};
     return map[settings[ratioKey] || 'square'] || '1:1';
 }
 function gcdInt(a, b){
@@ -1381,8 +1744,8 @@ function ratioIconClass(value){
     if(value === 'portrait43') return 'r-portrait43';
     if(value === 'landscape') return 'r-landscape';
     if(value === 'landscape43') return 'r-landscape43';
-    if(value === 'wide') return 'r-wide';
-    if(value === 'story') return 'r-story';
+    if(value === 'wide' || value === 'ultrawide') return 'r-wide';
+    if(value === 'story' || value === 'ultratall') return 'r-story';
     if(value === 'source') return 'r-source';
     if(value === 'custom') return 'r-custom';
     return '';
@@ -1396,7 +1759,7 @@ function videoAspectIconClass(value){
     return '';
 }
 function renderProviderControl(providers){
-    const current = apiProviderById(settings.provider_id);
+    const current = (providers || []).find(p => p.id === settings.provider_id) || apiProviderById(settings.provider_id);
     return `<div class="smart-control provider-control">
         <button class="smart-pill" type="button"><i data-lucide="plug-zap"></i><span class="sub">${escapeHtml(current?.name || settings.provider_id || tr('smart.platform'))}</span></button>
         <div class="smart-popover compact-popover">
@@ -1424,7 +1787,7 @@ function msModelLabel(key){
 }
 function renderMsFunctionControl(){
     return `<div class="smart-control provider-control">
-        <button class="smart-pill" type="button"><i data-lucide="sparkles"></i><span class="sub">${escapeHtml(msModelLabel(settings.msgenModel) || 'ModelScope')}</span></button>
+        <button class="smart-pill" type="button"><i data-lucide="sparkles"></i><span class="sub">${escapeHtml(msModelLabel(settings.msgenModel) || 'Modelscope')}</span></button>
         <div class="smart-popover compact-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.msFunction'))}</div>
             <div class="model-list">
@@ -1452,7 +1815,7 @@ function renderRatioControl(prefix='', includeSource=false){
     const resKey = prefix ? `${prefix}Resolution` : 'resolution';
     const ratios = [
         ['square','1:1'], ['portrait','2:3'], ['landscape','3:2'], ['portrait43','3:4'], ['landscape43','4:3'],
-        ['story','9:16'], ['wide','16:9'],
+        ['story','9:16'], ['wide','16:9'], ['ultrawide','21:9'], ['ultratall','9:21'],
         ...(includeSource ? [['source', tr('smart.imageRatio')]] : []),
         ['custom', tr('smart.custom')]
     ];
@@ -1588,7 +1951,7 @@ function renderComfySettingField(field){
 const RH_KNOWN_FIELD_OPTIONS = {
     aspectRatio:['1:1','16:9','9:16','4:3','3:4','4:5','5:4','3:2','2:3','21:9','9:21'],
     aspect_ratio:['1:1','16:9','9:16','4:3','3:4','4:5','5:4','3:2','2:3','21:9','9:21'],
-    ratio:['1:1','16:9','9:16','4:3','3:4','4:5','5:4','3:2','2:3'],
+    ratio:['1:1','16:9','9:16','21:9','9:21','4:3','3:4','4:5','5:4','3:2','2:3'],
     resolution:['1k','2k','4k','8k'],
     size:['512','768','1024','1280','1536','2048'],
     quality:['low','medium','high','best'],
@@ -1603,6 +1966,7 @@ function rhFieldKind(field){
     if(type === 'IMAGE') return 'image';
     if(type === 'VIDEO') return 'video';
     if(type === 'AUDIO') return 'audio';
+    if(type === 'SLIDER') return 'slider';
     if(['NUMBER','FLOAT','INTEGER','INT'].includes(type)) return 'number';
     if(['BOOLEAN','BOOL'].includes(type)) return 'boolean';
     const key = `${field?.fieldName || ''} ${field?.fieldValue || ''}`.toLowerCase();
@@ -1613,7 +1977,7 @@ function rhFieldKind(field){
 }
 function rhFieldRole(field){
     const kind = rhFieldKind(field);
-    if(['image','video','audio','number','boolean'].includes(kind)) return kind;
+    if(['image','video','audio','number','slider','boolean'].includes(kind)) return kind;
     const text = `${field?.fieldName || ''} ${field?.label || ''} ${field?.group || ''}`.toLowerCase();
     if(/prompt|positive|negative|text|caption|description|关键词|提示词|正向|负向/.test(text)) return 'prompt';
     return 'text';
@@ -1648,8 +2012,12 @@ function rhRandomEnabled(field){
     return rhFieldKind(field) === 'number' && field?.random_enabled === true;
 }
 function smartRhRandomActive(key){
-    settings.rhRandomActive = settings.rhRandomActive || {};
-    return settings.rhRandomActive[key] !== false;
+    return smartRhRandomActiveFor(settings, key);
+}
+function smartRhRandomActiveFor(sourceSettings=settings, key){
+    sourceSettings = sourceSettings || settings;
+    sourceSettings.rhRandomActive = sourceSettings.rhRandomActive || {};
+    return sourceSettings.rhRandomActive[key] !== false;
 }
 function toggleSmartRhRandom(key){
     const field = rhActiveFields().find(f => rhParamKey(f.nodeId, f.fieldName) === key);
@@ -1670,20 +2038,21 @@ function smartRhRandomValue(field){
         type:'number'
     });
 }
-function rhParamValue(field, media=null){
-    settings.rhParams = settings.rhParams || {};
+function rhParamValue(field, media=null, sourceSettings=settings, fields=null, randomValues=smartRhRandomValues){
+    sourceSettings = sourceSettings || settings;
+    sourceSettings.rhParams = sourceSettings.rhParams || {};
     const key = rhParamKey(field.nodeId, field.fieldName);
-    const param = settings.rhParams[key];
+    const param = sourceSettings.rhParams[key];
     const kind = rhFieldKind(field);
     if(['image','video','audio'].includes(kind)){
-        const idx = rhFieldIndexes(rhActiveFields())[key] || 0;
+        const idx = rhFieldIndexes(fields || rhActiveFields(sourceSettings))[key] || 0;
         const up = media?.[kind]?.[idx]?.url || '';
-        if(rhCurrentKind() === 'workflow' && kind === 'image' && field.required !== true && !up) return '';
+        if(rhCurrentKind(sourceSettings) === 'workflow' && kind === 'image' && field.required !== true && !up) return '';
         return up || param?.value || rhDefaultValue(field);
     }
-    if(rhRandomEnabled(field) && smartRhRandomActive(key)){
-        if(smartRhRandomValues[key] === undefined) smartRhRandomValues[key] = smartRhRandomValue(field);
-        return smartRhRandomValues[key];
+    if(rhRandomEnabled(field) && smartRhRandomActiveFor(sourceSettings, key)){
+        if(randomValues[key] === undefined) randomValues[key] = smartRhRandomValue(field);
+        return randomValues[key];
     }
     if(rhFieldRole(field) === 'prompt') return param?.value ?? (media?.prompt || rhDefaultValue(field));
     return param?.value ?? rhDefaultValue(field);
@@ -1734,8 +2103,8 @@ async function ensureRunningHubWorkflow(workflowId){
     runningHubWorkflowCache[workflowId] = data.workflow || null;
     return runningHubWorkflowCache[workflowId];
 }
-async function currentRunningHubWorkflowConfig(){
-    const ref = selectedRunningHubRef();
+async function currentRunningHubWorkflowConfig(sourceSettings=settings){
+    const ref = selectedRunningHubRef(sourceSettings);
     if(ref?.kind !== 'workflow') return null;
     const cached = await ensureRunningHubWorkflow(ref.id).catch(() => null);
     return {
@@ -1757,91 +2126,118 @@ function rhMediaForRun(prompt, refs){
         prompt:String(prompt || '').trim()
     };
 }
-function tempShUploadedUrlFor(url){
-    const match = (settings.videoTempShLinks || []).find(item => item?.source === url && item?.url);
+function tempShUploadedUrlFor(url, sourceSettings=settings){
+    const source = String(url || '');
+    const manualLinks = ((sourceSettings || settings).videoTempShLinks || []).filter(item => item?.manual === true);
+    const links = [...(transientSmartCloudLinks || []), ...manualLinks];
+    const match = links.find(item =>
+        item?.url && (item?.source === source || item?.originalLocalUrl === source || item?.url === source)
+    );
     return match?.url || url;
 }
-function applyUploadedUrlsToSmartRefs(refs){
+function mediaRefSourceUrl(ref){
+    return localDisplayUrlForMediaItem(ref) || ref?.sourceUrl || ref?.originalLocalUrl || ref?.url || '';
+}
+function applyUploadedUrlsToSmartRefs(refs, sourceSettings=settings){
     return (refs || []).map(ref => {
         if(!ref?.url) return ref;
-        const url = tempShUploadedUrlFor(ref.url);
+        const sourceUrl = mediaRefSourceUrl(ref);
+        const url = tempShUploadedUrlFor(sourceUrl, sourceSettings);
         return url && url !== ref.url ? {...ref, url, originalLocalUrl:ref.originalLocalUrl || ref.url} : ref;
     });
 }
-function manualSmartVideoLink(){
-    return (settings.videoTempShLinks || []).find(item => item?.manual === true && item?.url) || null;
+function manualSmartVideoLink(sourceSettings=settings){
+    return ((sourceSettings || settings).videoTempShLinks || []).find(item => item?.manual === true && item?.url) || null;
 }
-function currentSmartMediaLinks(){
-    const request = buildPromptRequest(activeSettingsSubject(), null, true, smartLoopContext);
-    const refs = (request.refs || []).filter(ref => ref?.url && ['image','video'].includes(mediaKindForItem(ref)));
-    return refs.map(ref => {
-        const uploaded = tempShUploadedUrlFor(ref.url);
-        return uploaded && uploaded !== ref.url ? uploaded : '';
+function manualSmartMediaLinks(sourceSettings=settings){
+    return ((sourceSettings || settings).videoTempShLinks || []).filter(item => item?.manual === true && item?.url);
+}
+function renderedInputMediaRefs(){
+    if(!inputThumbsRow) return [];
+    return [...inputThumbsRow.querySelectorAll('.input-thumb')].map((el, index) => ({
+        url:el.dataset.url || '',
+        sourceUrl:el.dataset.sourceUrl || el.dataset.url || '',
+        nodeId:el.dataset.nodeId || '',
+        imageIndex:Number.isFinite(Number(el.dataset.imageIndex)) ? Number(el.dataset.imageIndex) : index,
+        name:tr('smart.inputNum').replace('{n}', String(index + 1)),
+        role:`image_${index + 1}`
+    })).filter(ref => ref.url);
+}
+function currentSmartMediaRefs(node){
+    if(!node) return [];
+    const request = buildPromptRequest(node, null, true, smartLoopContext);
+    return (request.refs || []).filter(ref => ref?.url && ['image','video'].includes(mediaKindForItem(ref)));
+}
+function currentUploadMediaRefs(node){
+    const rendered = renderedInputMediaRefs();
+    if(rendered.length) return rendered;
+    return currentSmartMediaRefs(node);
+}
+function currentSmartMediaLinks(node=null){
+    return currentUploadMediaRefs(node || activeSettingsSubject()).map(ref => {
+        const sourceUrl = mediaRefSourceUrl(ref);
+        const uploaded = tempShUploadedUrlFor(sourceUrl);
+        return uploaded && uploaded !== sourceUrl ? uploaded : '';
     }).filter(Boolean);
 }
 function clearManualSmartVideoUrl(){
     settings.videoTempShLinks = (settings.videoTempShLinks || []).filter(item => item?.manual !== true);
 }
-function applyTempShUrlToSmartRef(ref, uploadedUrl){
-    if(!ref?.nodeId || !Number.isFinite(Number(ref.imageIndex))) return false;
-    const node = nodes.find(n => n.id === ref.nodeId);
-    const index = Number(ref.imageIndex);
-    if(!node?.images?.[index]) return false;
-    node.images[index] = {
-        ...node.images[index],
-        url:uploadedUrl,
-        tempShUrl:uploadedUrl,
-        originalLocalUrl:node.images[index].originalLocalUrl || ref.url,
-        kind:mediaKindForItem(ref)
-    };
-    return true;
+function splitManualMediaUrls(text){
+    return String(text || '')
+        .split(/[\s,，]+/)
+        .map(url => url.trim())
+        .filter(Boolean);
 }
 async function uploadMediaRefToCloud(ref){
     const kind = mediaKindForItem(ref);
-    if(!ref?.url) throw new Error('没有可上传的媒体');
-    if(/^https?:\/\//i.test(ref.url)) return ref.url;
+    const sourceUrl = mediaRefSourceUrl(ref);
+    if(!sourceUrl) throw new Error('没有可上传的媒体');
+    const existing = tempShUploadedUrlFor(sourceUrl);
+    if(existing && existing !== sourceUrl) return existing;
+    if(/^https?:\/\//i.test(sourceUrl)) return sourceUrl;
     const response = await fetch('/api/cloud-video/upload', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({url:ref.url, service:'auto'})
+        body:JSON.stringify({url:sourceUrl, service:'auto'})
     });
     if(!response.ok) throw new Error(await smartResponseErrorMessage(response, '云端上传失败'));
     const data = await response.json();
     const uploadedUrl = data.url || '';
     if(!uploadedUrl) throw new Error('云端没有返回链接');
-    settings.videoTempShLinks = [
-        ...(settings.videoTempShLinks || []).filter(item => item?.source !== ref.url),
-        {source:ref.url, url:uploadedUrl, expires:data.expires || '3 days', kind}
+    transientSmartCloudLinks = [
+        ...(transientSmartCloudLinks || []).filter(item => item?.source !== sourceUrl),
+        {source:sourceUrl, url:uploadedUrl, expires:data.expires || '3 days', kind}
     ];
-    applyTempShUrlToSmartRef(ref, uploadedUrl);
     return uploadedUrl;
 }
 function applyManualVideoUrlToSmartRef(ref, manualUrl){
-    clearManualSmartVideoUrl();
+    if(!manualUrl) return;
+    const sourceUrl = mediaRefSourceUrl(ref) || manualUrl;
     settings.videoTempShLinks = [
-        ...(settings.videoTempShLinks || []),
-        {source:ref?.url || manualUrl, url:manualUrl, manual:true}
+        ...(settings.videoTempShLinks || []).filter(item => item?.source !== sourceUrl),
+        {source:sourceUrl, url:manualUrl, manual:true}
     ];
 }
 async function setCurrentSmartManualVideoUrl(){
     const node = activeSettingsSubject();
     if(!node) return '';
     savePromptDraftForCurrent();
-    const request = buildPromptRequest(node, null, true, smartLoopContext);
-    const refs = (request.refs || []).filter(ref => ref?.url && ['image','video'].includes(mediaKindForItem(ref)));
+    const refs = currentUploadMediaRefs(node);
     const firstLocal = refs.find(ref => ref?.url && !isRemoteVideoReferenceUrl(ref.url));
     const firstAny = firstLocal || refs[0] || null;
-    const manual = manualSmartVideoLink();
-    const current = manual?.url || currentSmartMediaLinks()[0] || (firstAny ? tempShUploadedUrlFor(firstAny.url) : '');
+    const linkedUrls = currentSmartMediaLinks(node);
+    const currentLinks = linkedUrls.length ? linkedUrls : (firstAny ? [tempShUploadedUrlFor(mediaRefSourceUrl(firstAny))] : []);
     const value = await openAssetNameDialog({
-        title:'输入媒体网址 / 火山素材 URI',
-        value:isRemoteVideoReferenceUrl(current) ? current : '',
-        placeholder:'https://example.com/media 或 asset://asset-xxx',
-        cancelValue:null
+        title:refs.length > 1 ? `输入 ${refs.length} 个媒体网址 / 火山素材 URI` : '输入媒体网址 / 火山素材 URI',
+        value:currentLinks.filter(isRemoteVideoReferenceUrl).join('\n'),
+        placeholder:refs.length > 1 ? '每行一个链接，按图1/图2顺序对应' : 'https://example.com/media 或 asset://asset-xxx',
+        cancelValue:null,
+        multiline:refs.length > 1
     });
     if(value === null) return '';
-    const url = String(value || '').trim();
-    if(!url){
+    const urls = splitManualMediaUrls(value);
+    if(!urls.length){
         clearManualSmartVideoUrl();
         persistActiveSmartSettings();
         scheduleSave();
@@ -1849,29 +2245,39 @@ async function setCurrentSmartManualVideoUrl(){
         toast('已清除手动网址');
         return '';
     }
-    if(!isRemoteVideoReferenceUrl(url)){
+    const invalid = urls.find(url => !isRemoteVideoReferenceUrl(url));
+    if(invalid){
         toast('请输入 http/https 媒体网址或 asset:// 火山素材 URI');
         return '';
     }
-    applyManualVideoUrlToSmartRef(firstAny, url);
+    clearManualSmartVideoUrl();
+    const targets = refs.length ? refs : [firstAny].filter(Boolean);
+    urls.forEach((url, index) => {
+        const target = targets[index] || targets[targets.length - 1] || {url};
+        applyManualVideoUrlToSmartRef(target, url);
+    });
     persistActiveSmartSettings();
     scheduleSave();
     render();
-    toast('已设置视频网址');
-    return url;
+    toast(`已设置 ${urls.length} 个媒体网址`);
+    return urls[0] || '';
 }
 async function uploadCurrentSmartVideosToCloud(){
     const node = activeSettingsSubject();
     if(!node) return [];
     savePromptDraftForCurrent();
-    const request = buildPromptRequest(node, null, true, smartLoopContext);
-    const refs = (request.refs || []).filter(ref => ref?.url && ['image','video'].includes(mediaKindForItem(ref)));
-    const localRefs = refs.filter(ref => ref?.url && !isRemoteVideoReferenceUrl(ref.url));
+    const refs = currentUploadMediaRefs(node);
+    const localRefs = refs.filter(ref => {
+        const sourceUrl = ref?.sourceUrl || ref?.originalLocalUrl || ref?.url || '';
+        if(!sourceUrl) return false;
+        const uploaded = tempShUploadedUrlFor(sourceUrl);
+        return uploaded !== sourceUrl || !isRemoteVideoReferenceUrl(sourceUrl);
+    });
     if(!localRefs.length){
-        toast('没有需要上传的本地图片或视频');
+        toast('当前输入图片或视频已是云端链接');
         return [];
     }
-    const btn = inputThumbsRow?.querySelector('[data-temp-sh-upload-video]');
+    const btn = dynamicParams?.querySelector('[data-trusted-source="cloud"]') || inputThumbsRow?.querySelector('[data-temp-sh-upload-video]');
     if(btn) btn.disabled = true;
     toast(`正在上传 ${localRefs.length} 个媒体文件到云端...`);
     try {
@@ -1879,9 +2285,6 @@ async function uploadCurrentSmartVideosToCloud(){
         for(const ref of localRefs){
             urls.push(await uploadMediaRefToCloud(ref));
         }
-        persistActiveSmartSettings();
-        scheduleSave();
-        render();
         toast(`云端上传完成：${urls.length} 个媒体文件`);
         return urls;
     } finally {
@@ -1913,10 +2316,10 @@ function rhPruneWorkflowForMissingFields(workflowJson, missingFields){
     });
     return workflow;
 }
-async function rhBuildWorkflowRequestExtras(media, nodeInfoList){
-    const config = await currentRunningHubWorkflowConfig();
+async function rhBuildWorkflowRequestExtras(media, nodeInfoList, sourceSettings=settings){
+    const config = await currentRunningHubWorkflowConfig(sourceSettings);
     if(!config || (config.optionalImageMode || 'prune-workflow') !== 'prune-workflow') return {};
-    const fields = rhActiveFields();
+    const fields = rhActiveFields(sourceSettings);
     const indexes = rhFieldIndexes(fields);
     const missingOptional = [];
     for(const field of fields){
@@ -1936,24 +2339,24 @@ async function rhBuildWorkflowRequestExtras(media, nodeInfoList){
     const workflow = rhPruneWorkflowForMissingFields(config.workflowJson || {}, missingOptional);
     return workflow ? {workflow} : {};
 }
-async function rhUploadValueIfNeeded(value){
+async function rhUploadValueIfNeeded(value, sourceSettings=settings){
     const text = String(value || '').trim();
     if(!text) return '';
     if(!/^https?:\/\//i.test(text) && !text.startsWith('/output/') && !text.startsWith('/assets/')) return text;
     const res = await fetch('/api/runninghub/upload-asset', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({url:text, useWallet:settings.rhPayment === 'wallet'})
+        body:JSON.stringify({url:text, useWallet:(sourceSettings || settings).rhPayment === 'wallet'})
     });
     const data = await res.json();
     if(!res.ok || data.success === false) throw new Error(data.detail || data.error || tr('smart.rhUploadFailed'));
     return data.data?.fileName || text;
 }
-async function rhBuildNodeInfoList(media){
-    const fields = rhActiveFields();
+async function rhBuildNodeInfoList(media, sourceSettings=settings, randomValues=smartRhRandomValues){
+    const fields = rhActiveFields(sourceSettings);
     const result = [];
     const indexes = rhFieldIndexes(fields);
-    const mode = rhCurrentKind();
+    const mode = rhCurrentKind(sourceSettings);
     for(const field of fields){
         const kind = rhFieldKind(field);
         const key = rhParamKey(field.nodeId, field.fieldName);
@@ -1962,9 +2365,10 @@ async function rhBuildNodeInfoList(media){
             const idx = indexes[key] || 0;
             if(field.required !== true && !media.image?.[idx]?.url) continue;
         }
-        let value = rhParamValue(field, media);
+        let value = rhParamValue(field, media, sourceSettings, fields, randomValues);
         if(rhFieldRole(field) === 'prompt' && !String(value || '').trim()) value = rhDefaultValue(field);
-        if(['image','video','audio'].includes(kind)) value = await rhUploadValueIfNeeded(value);
+        if(['image','video','audio'].includes(kind)) value = await rhUploadValueIfNeeded(value, sourceSettings);
+        if(['number','slider'].includes(kind) && String(value ?? '').trim() !== '' && !Number.isNaN(Number(value))) value = Number(value);
         if(typeof value === 'string' && /[\r\n]/.test(value)) value = value.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0] || '';
         result.push({nodeId:field.nodeId, fieldName:field.fieldName, fieldValue:value});
     }
@@ -1979,6 +2383,19 @@ function renderRhSettingField(field){
     if(kind === 'boolean'){
         const active = String(value).toLowerCase() === 'true';
         return `<button type="button" class="setting-check ${active ? 'active' : ''}" data-rh-bool="${escapeHtml(key)}"><span class="check-box"></span><span>${escapeHtml(label)}</span></button>`;
+    }
+    if(kind === 'slider'){
+        const min = Number.isFinite(Number(field.min)) ? Number(field.min) : 0;
+        const max = Number.isFinite(Number(field.max)) && Number(field.max) > min ? Number(field.max) : 1;
+        const step = Number.isFinite(Number(field.step)) && Number(field.step) > 0 ? Number(field.step) : 0.01;
+        const numericValue = Number.isFinite(Number(value)) ? Number(value) : min;
+        return `<div class="smart-control rh-slider-control" title="${escapeHtml(label)}">
+            <button class="smart-pill" type="button"><span class="sub">${escapeHtml(label)}</span><span class="rh-slider-pill-value">${escapeHtml(numericValue)}</span></button>
+            <div class="smart-popover compact-popover rh-picker-popover rh-param-popover rh-slider-popover">
+                <div class="smart-popover-title"><span>${escapeHtml(label)}</span><span class="rh-slider-value">${escapeHtml(numericValue)}</span></div>
+                <input type="range" class="smart-range rh-slider-input" data-rh-param="${escapeHtml(key)}" data-rh-type="slider" min="${escapeHtml(min)}" max="${escapeHtml(max)}" step="${escapeHtml(step)}" value="${escapeHtml(numericValue)}">
+            </div>
+        </div>`;
     }
     if(options?.length){
         const curLabel = String(value || options[0] || label);
@@ -2040,6 +2457,8 @@ function setDynamicSetting(key, value){
     settings[key] = numericKeys.has(key) && value !== '' ? Number(value) : value;
     if(key === 'provider_id') settings.model = '';
     if(key === 'videoProvider') settings.videoModel = '';
+    if(key === 'videoMultimodal' && settings.videoMultimodal) settings.videoUseFrameRoles = false;
+    if(key === 'videoUseFrameRoles' && settings.videoUseFrameRoles) settings.videoMultimodal = false;
     if(key === 'comfyMode') applyRecentSmartSettingsForCurrentMode();
     if(key === 'resolution'){
         if(settings.resolution === 'custom') settings.ratio = '';
@@ -2110,9 +2529,28 @@ function bindDynamicParams(){
             event.preventDefault();
             event.stopPropagation();
             settings[btn.dataset.toggleParam] = !settings[btn.dataset.toggleParam];
+            if(btn.dataset.toggleParam === 'videoMultimodal' && settings.videoMultimodal) settings.videoUseFrameRoles = false;
+            if(btn.dataset.toggleParam === 'videoUseFrameRoles' && settings.videoUseFrameRoles) settings.videoMultimodal = false;
             persistActiveSmartSettings();
             renderDynamicParams();
             scheduleSave();
+        };
+    });
+    dynamicParams.querySelectorAll('[data-trusted-source]').forEach(btn => {
+        btn.onclick = async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            const src = btn.dataset.trustedSource;
+            settings.videoTrustedSource = ['library','cloud','manual'].includes(src) ? src : 'library';
+            persistActiveSmartSettings();
+            renderDynamicParams();
+            scheduleSave();
+            try {
+                if(src === 'cloud') await uploadCurrentSmartVideosToCloud();
+                else if(src === 'manual') await setCurrentSmartManualVideoUrl();
+            } catch(e) {
+                toast((e.message || '操作失败').slice(0, 180));
+            }
         };
     });
     dynamicParams.querySelectorAll('[data-comfy-bool]').forEach(btn => {
@@ -2190,9 +2628,20 @@ function bindDynamicParams(){
             settings.rhParams = settings.rhParams || {};
             const cur = settings.rhParams[key] || {};
             settings.rhParams[key] = {...cur, value:input.value};
+            const control = input.closest('.smart-control');
+            const valueText = control?.querySelector('.rh-slider-value');
+            const pillValue = control?.querySelector('.rh-slider-pill-value');
+            if(valueText) valueText.textContent = input.value;
+            if(pillValue) pillValue.textContent = input.value;
             persistActiveSmartSettings();
             scheduleSave();
         };
+        if(input.dataset.rhType === 'slider'){
+            input.onpointerup = () => input.blur();
+            input.onmouseleave = () => {
+                if(!input.closest('.smart-control')?.matches(':hover')) input.blur();
+            };
+        }
     });
     dynamicParams.querySelectorAll('[data-rh-pick]').forEach(btn => {
         btn.onclick = event => {
@@ -2230,6 +2679,9 @@ async function loadConfig(){
         const cfg = await fetch('/api/config').then(r => r.json());
         apiProviders = Array.isArray(cfg.api_providers) ? cfg.api_providers : [];
         comfyInstanceCount = Math.max(1, (Array.isArray(cfg.comfy_instances) ? cfg.comfy_instances : []).filter(Boolean).length || 1);
+        // 提供商配置已就绪即先渲染参数面板，避免等工作流/RunningHub 预取完成后参数才「突然刷新出来」。
+        sanitizeSmartApiSelection(settings);
+        updateProviderModels();
         const wf = await fetch('/api/workflows').then(r => r.json()).catch(() => ({workflows:[]}));
         comfyWorkflows = Array.isArray(wf.workflows) ? wf.workflows : [];
         runningHubWorkflowCache = {};
@@ -2239,6 +2691,7 @@ async function loadConfig(){
             try { await ensureRunningHubWorkflow(workflowId); } catch(_) {}
         }));
         lastConfigRefreshAt = Date.now();
+        sanitizeSmartApiSelection(settings);
         updateProviderModels();
     } catch(e) {
         toast(tr('smart.toastApiSettingsFail'));
@@ -2248,7 +2701,10 @@ async function refreshSmartConfigFromSettings(){
     await loadConfig();
     renderDynamicParams();
     const node = selectedNode();
-    if(node?.type === 'smart-prompt') render();
+    if(node?.type === 'smart-prompt') {
+        applySettingsToNode(node);
+        render();
+    }
 }
 function loadPromptPresets(){
     try {
@@ -2260,6 +2716,149 @@ function loadPromptPresets(){
 }
 function savePromptPresets(){
     localStorage.setItem(PROMPT_PRESETS_KEY, JSON.stringify(promptPresets));
+}
+function defaultPromptTemplateGroups(){
+    return [
+        {id:'view', name:tr('smart.tplCatView')},
+        {id:'storyboard', name:tr('smart.tplCatStoryboard')},
+        {id:'character', name:tr('smart.tplCatCharacter')},
+        {id:'product', name:tr('smart.tplCatProduct')},
+        {id:'lighting', name:tr('smart.tplCatLighting')},
+        {id:'mine', name:tr('smart.tplCatMine')}
+    ];
+}
+function loadPromptTemplateGroups(){
+    try {
+        const list = JSON.parse(localStorage.getItem(PROMPT_TEMPLATE_GROUPS_KEY) || '[]');
+        const valid = Array.isArray(list) ? list.filter(g => g?.id && g?.name) : [];
+        const defaults = defaultPromptTemplateGroups();
+        promptTemplateGroups = defaults.map(group => valid.find(g => g.id === group.id) || group);
+        valid.filter(g => !promptTemplateGroups.some(x => x.id === g.id)).forEach(g => promptTemplateGroups.push(g));
+    } catch(e) {
+        promptTemplateGroups = defaultPromptTemplateGroups();
+    }
+}
+function savePromptTemplateGroups(){
+    localStorage.setItem(PROMPT_TEMPLATE_GROUPS_KEY, JSON.stringify(promptTemplateGroups));
+}
+function loadPromptTemplateOverrides(){
+    try {
+        const data = JSON.parse(localStorage.getItem(PROMPT_TEMPLATE_OVERRIDES_KEY) || '{}');
+        promptTemplateOverrides = {
+            hiddenBuiltinIds:Array.isArray(data.hiddenBuiltinIds) ? data.hiddenBuiltinIds : [],
+            editedBuiltins:data.editedBuiltins && typeof data.editedBuiltins === 'object' ? data.editedBuiltins : {}
+        };
+    } catch(e) {
+        promptTemplateOverrides = {hiddenBuiltinIds:[], editedBuiltins:{}};
+    }
+}
+function savePromptTemplateOverrides(){
+    localStorage.setItem(PROMPT_TEMPLATE_OVERRIDES_KEY, JSON.stringify(promptTemplateOverrides));
+}
+async function loadPromptTemplates(){
+    try {
+        const data = await fetch('/api/prompt-libraries').then(r => r.ok ? r.json() : {library:{libraries:[]}});
+        promptLibraries = Array.isArray(data.library?.libraries) ? data.library.libraries : [];
+        if(!promptLibraries.length) {
+            const fallback = await fetch('/api/smart-canvas/prompt-templates').then(r => r.ok ? r.json() : {templates:[]});
+            builtinPromptTemplates = Array.isArray(fallback.templates) ? fallback.templates.filter(t => t?.id && t?.positive) : [];
+            promptLibraries = [{id:'system', name:'系统提示词库', readonly:true, items:builtinPromptTemplates}];
+        } else {
+            const system = promptLibraries.find(lib => lib.id === 'system') || promptLibraries[0];
+            builtinPromptTemplates = Array.isArray(system?.items) ? system.items.filter(t => t?.id && t?.positive) : [];
+        }
+        if(!promptLibraries.some(lib => lib.id === activePromptLibraryId)) activePromptLibraryId = promptLibraries[0]?.id || 'system';
+        renderPromptLibrarySelect();
+    } catch(e) {
+        builtinPromptTemplates = [];
+        promptLibraries = [];
+    }
+}
+function activePromptLibrary(){
+    return promptLibraries.find(lib => lib.id === activePromptLibraryId) || promptLibraries[0] || {id:'system', name:'系统提示词库', readonly:true, items:builtinPromptTemplates};
+}
+function renderPromptLibrarySelect(){
+    if(!promptTemplateLibrarySelect) return;
+    promptTemplateLibrarySelect.innerHTML = promptLibraries.map(lib => `<option value="${escapeAttr(lib.id)}" ${lib.id === activePromptLibraryId ? 'selected' : ''}>${escapeHtml(lib.name || '提示词库')}</option>`).join('');
+}
+function promptTemplateItems(){
+    const activeLibrary = activePromptLibrary();
+    if(activeLibrary.id !== 'system'){
+        return (activeLibrary.items || []).filter(t => t?.id && t?.positive).map(t => ({
+            ...t,
+            sourceId:t.id,
+            builtin:false,
+            remote:true,
+            libraryId:activeLibrary.id
+        }));
+    }
+    const hidden = new Set(promptTemplateOverrides.hiddenBuiltinIds || []);
+    const builtins = builtinPromptTemplates
+        .filter(t => !hidden.has(t.id))
+        .map(t => ({...t, ...(promptTemplateOverrides.editedBuiltins?.[t.id] || {}), builtin:true}));
+    const mine = promptPresets.map(p => ({
+        id:`mine:${p.id}`,
+        sourceId:p.id,
+        name:p.name || tr('smart.promptPresetUnnamed'),
+        category:p.category || 'mine',
+        scene:'我的提示词预设',
+        positive:p.text || '',
+        negative:'',
+        params:{},
+        builtin:false
+    }));
+    return [...builtins, ...mine];
+}
+function promptTemplateText(template, mode='positive'){
+    const positive = String(template?.positive || '').trim();
+    if(mode === 'positive' || !template?.builtin) return positive;
+    const negative = String(template?.negative || '').trim();
+    const params = Object.entries(template?.params || {})
+        .map(([key, value]) => `${key}: ${value}`)
+        .join('\n');
+    return [positive, negative ? `Negative prompt:\n${negative}` : '', params ? `Params:\n${params}` : ''].filter(Boolean).join('\n\n');
+}
+function promptTemplateName(template){
+    if(window.StudioI18n?.lang?.() === 'en' && template?.name_en) return template.name_en;
+    return template?.name || '';
+}
+function promptTemplateScene(template){
+    if(window.StudioI18n?.lang?.() === 'en' && template?.scene_en) return template.scene_en;
+    return template?.scene || '';
+}
+function promptTemplateSearchText(template){
+    return [
+        template?.name,
+        template?.name_en,
+        template?.scene,
+        template?.scene_en,
+        template?.positive,
+        template?.negative
+    ].join(' ').toLowerCase();
+}
+function activePromptTemplateGroups(){
+    const lib = activePromptLibrary();
+    if(!lib || lib.id === 'system') return promptTemplateGroups;
+    return Array.isArray(lib.categories) ? lib.categories.filter(c => c?.id && c?.name) : [];
+}
+function promptTemplateCategoryLabel(category){
+    if(category === 'all') return tr('smart.tplAll');
+    const lib = activePromptLibrary();
+    if(lib && lib.id !== 'system'){
+        return activePromptTemplateGroups().find(g => g.id === category)?.name || category;
+    }
+    const builtin = {
+        view:tr('smart.tplCatView'),
+        storyboard:tr('smart.tplCatStoryboard'),
+        character:tr('smart.tplCatCharacter'),
+        product:tr('smart.tplCatProduct'),
+        lighting:tr('smart.tplCatLighting'),
+        mine:tr('smart.tplCatMine')
+    };
+    return builtin[category] || promptTemplateGroups.find(g => g.id === category)?.name || category;
+}
+function promptTemplateSelectedItem(){
+    return promptTemplateItems().find(item => item.id === promptTemplateSelectedId) || promptTemplateItems()[0] || null;
 }
 function currentPromptPreset(id){
     return promptPresets.find(p => p.id === id) || null;
@@ -2283,7 +2882,7 @@ function resetPromptPresetDeleteState(){
         promptPresetDelete.classList.remove('confirm-danger');
     }
 }
-function createPromptPresetFromNode(node, {openPanel=true}={}){
+function createPromptPresetFromNode(node, {openPanel=true, openTemplatePanel=false}={}){
     const text = String(node?.text || '').trim();
     if(!text){ toast(tr('smart.promptPresetEmpty')); return null; }
     const preset = {id:uid('preset'), name:defaultPromptPresetName(text), text, createdAt:Date.now(), updatedAt:Date.now()};
@@ -2293,6 +2892,22 @@ function createPromptPresetFromNode(node, {openPanel=true}={}){
     render();
     scheduleSave();
     if(openPanel) openPromptPresetPanel(node?.id || '', preset.id, {status:tr('smart.promptPresetSavedNew'), tone:'ok'});
+    if(openTemplatePanel) {
+        promptTemplateCategory = 'mine';
+        promptTemplateSelectedId = `mine:${preset.id}`;
+        promptTemplateEditing = true;
+        openPromptTemplatePanel(node?.id || '', promptTemplateSelectedId);
+    }
+    return preset;
+}
+function createPromptPresetFromComposer(){
+    const text = promptPlainText();
+    if(!text){ toast(tr('smart.promptPresetEmpty')); return null; }
+    const preset = {id:uid('preset'), name:defaultPromptPresetName(text), text, category:'mine', createdAt:Date.now(), updatedAt:Date.now()};
+    promptPresets.unshift(preset);
+    savePromptPresets();
+    savePromptDraftForCurrent();
+    scheduleSave();
     return preset;
 }
 function savePromptNodeAsPreset(node){
@@ -2339,12 +2954,425 @@ function closePromptPresetPanel(){
     promptPresetPanel?.classList.remove('open');
     resetPromptPresetDeleteState();
 }
+function promptTemplateScrollSnapshot(){
+    if(!promptTemplatePanel) return null;
+    return {
+        panelTop:promptTemplatePanel.scrollTop || 0,
+        tabLeft:promptTemplatePanel.querySelector('.prompt-template-tabs')?.scrollLeft || 0,
+        listTop:promptTemplatePanel.querySelector('.prompt-template-list')?.scrollTop || 0,
+        detailTop:promptTemplatePanel.querySelector('.prompt-template-preview-content')?.scrollTop || 0
+    };
+}
+function restorePromptTemplateScroll(snapshot){
+    if(!snapshot || !promptTemplatePanel) return;
+    requestAnimationFrame(() => {
+        promptTemplatePanel.scrollTop = snapshot.panelTop || 0;
+        const tabs = promptTemplatePanel.querySelector('.prompt-template-tabs');
+        const list = promptTemplatePanel.querySelector('.prompt-template-list');
+        const detail = promptTemplatePanel.querySelector('.prompt-template-preview-content');
+        if(tabs) tabs.scrollLeft = snapshot.tabLeft || 0;
+        if(list) list.scrollTop = snapshot.listTop || 0;
+        if(detail) detail.scrollTop = snapshot.detailTop || 0;
+    });
+}
+function renderPromptTemplatePanel(options={}){
+    if(!promptTemplatePanel || !promptTemplateBody || !promptTemplateCats) return;
+    renderPromptLibrarySelect();
+    const scrollSnapshot = options.preserveScroll === false ? null : promptTemplateScrollSnapshot();
+    const query = String(promptTemplateSearch?.value || '').trim().toLowerCase();
+    const allTemplates = promptTemplateItems();
+    const activeGroups = activePromptTemplateGroups();
+    const categories = [{id:'all', name:tr('smart.tplAll')}, ...activeGroups.map(group => ({...group, name:promptTemplateCategoryLabel(group.id)}))];
+    const groupCounts = allTemplates.reduce((map, item) => {
+        map[item.category || 'mine'] = (map[item.category || 'mine'] || 0) + 1;
+        return map;
+    }, {all:allTemplates.length});
+    promptTemplateCats.innerHTML = promptTemplateGroupEditMode ? `
+        <div class="prompt-template-group-panel">
+            <div class="prompt-template-group-title">
+                <div>
+                    <strong>${escapeHtml(tr('smart.tplGroupManage'))}</strong>
+                    <span>${escapeHtml(tr('smart.tplGroupHint'))}</span>
+                </div>
+                <div class="prompt-template-group-tools">
+                    <button type="button" data-template-cat-new><i data-lucide="plus"></i><span>${escapeHtml(tr('smart.tplAdd'))}</span></button>
+                    <button type="button" class="primary" data-template-group-edit><i data-lucide="check"></i><span>${escapeHtml(tr('smart.tplDone'))}</span></button>
+                </div>
+            </div>
+            <div class="prompt-template-group-list">
+                ${activeGroups.map(group => `
+                    <div class="prompt-template-group-row ${['view','storyboard','character','product','lighting','mine'].includes(group.id) ? '' : 'has-delete'}">
+                        <button type="button" class="group-name ${group.id === promptTemplateCategory ? 'active' : ''}" data-template-cat="${escapeHtml(group.id)}">
+                            <span>${escapeHtml(promptTemplateCategoryLabel(group.id))}</span>
+                            <small>${groupCounts[group.id] || 0}</small>
+                        </button>
+                        <button type="button" class="group-tool" data-template-cat-edit="${escapeHtml(group.id)}" title="${escapeAttr(tr('smart.tplRename'))}"><i data-lucide="pencil"></i></button>
+                        ${['view','storyboard','character','product','lighting','mine'].includes(group.id) ? '' : `<button type="button" class="group-tool danger" data-template-cat-delete="${escapeHtml(group.id)}" title="${escapeAttr(tr('common.delete'))}"><i data-lucide="trash-2"></i></button>`}
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    ` : `
+        <div class="prompt-template-nav">
+            <div class="prompt-template-tabs">
+                ${categories.map(cat => `
+                    <button type="button" class="${cat.id === promptTemplateCategory ? 'active' : ''}" data-template-cat="${escapeHtml(cat.id)}">
+                        <span>${escapeHtml(cat.name)}</span>
+                        <small>${groupCounts[cat.id] || 0}</small>
+                    </button>
+                `).join('')}
+            </div>
+            <button type="button" class="prompt-template-manage-groups" data-template-group-edit><i data-lucide="settings-2"></i><span>${escapeHtml(tr('smart.tplManageGroups'))}</span></button>
+        </div>
+    `;
+    const items = allTemplates.filter(item => {
+        if(promptTemplateCategory !== 'all' && item.category !== promptTemplateCategory) return false;
+        if(!query) return true;
+        return promptTemplateSearchText(item).includes(query);
+    });
+    if(items.length && !items.some(item => item.id === promptTemplateSelectedId)) promptTemplateSelectedId = items[0].id;
+    const selected = items.find(item => item.id === promptTemplateSelectedId) || items[0] || null;
+    const selectedPreset = selected?.builtin || selected?.remote
+        ? {id:selected.id, name:selected.name || '', text:selected.positive || '', category:selected.category || 'storyboard', builtin:Boolean(selected.builtin)}
+        : (selected ? currentPromptPreset(selected.sourceId) : null);
+    const target = promptTemplatePanel.dataset.target || 'node';
+    const node = nodes.find(n => n.id === promptTemplatePanel.dataset.nodeId);
+    const activeLibrary = activePromptLibrary();
+    const canEditCurrentLibrary = activeLibrary.id !== 'system' && !activeLibrary.readonly;
+    const editMode = Boolean(promptTemplateEditing && selectedPreset);
+    promptTemplateBody.innerHTML = `
+        <div class="prompt-template-list">
+            <div class="prompt-template-list-tools">
+                <button type="button" data-template-save-current><i data-lucide="bookmark-plus"></i><span>${escapeHtml(tr('smart.tplSaveCurrent'))}</span></button>
+                <button type="button" data-template-new><i data-lucide="file-plus-2"></i><span>${escapeHtml(tr('smart.tplNewTemplate'))}</span></button>
+            </div>
+            ${items.length ? items.map(item => `<button type="button" class="prompt-template-card ${item.id === selected?.id ? 'active' : ''}" data-template-id="${escapeHtml(item.id)}">
+                <span class="prompt-template-card-top">
+                    <span class="prompt-template-name">${escapeHtml(promptTemplateName(item))}</span>
+                    <span class="prompt-template-source">${escapeHtml(item.builtin ? tr('smart.tplBuiltin') : tr('smart.tplMine'))}</span>
+                </span>
+                <span class="prompt-template-scene">${escapeHtml(promptTemplateScene(item) || item.positive || '')}</span>
+                <span class="prompt-template-tag">${escapeHtml(promptTemplateCategoryLabel(item.category || 'mine'))}</span>
+            </button>`).join('') : `<div class="prompt-template-list-empty">${escapeHtml(tr('smart.tplNoMatches'))}</div>`}
+        </div>
+        <div class="prompt-template-detail">
+            ${selected ? `
+                <div class="prompt-template-detail-head">
+                    <div>
+                        <strong>${escapeHtml(promptTemplateName(selected) || '')}</strong>
+                        <span>${escapeHtml(promptTemplateCategoryLabel(selected.category || ''))} · ${escapeHtml(selected.builtin ? tr('smart.tplBuiltinTemplate') : tr('smart.tplMineTemplate'))}</span>
+                    </div>
+                    ${editMode ? '' : `
+                        <div class="prompt-template-icon-actions">
+                            <button type="button" ${selected?.builtin || !canEditCurrentLibrary ? 'disabled' : ''} data-template-edit title="${escapeAttr(tr('smart.tplEditTemplate'))}"><i data-lucide="pencil"></i><span>${escapeHtml(tr('common.edit'))}</span></button>
+                            <button type="button" ${selected?.builtin || !canEditCurrentLibrary ? 'disabled' : ''} class="danger" data-template-delete title="${escapeAttr(tr('smart.tplDeleteTemplate'))}"><i data-lucide="trash-2"></i><span>${escapeHtml(tr('common.delete'))}</span></button>
+                        </div>
+                    `}
+                </div>
+            ${editMode ? `
+                <div class="prompt-template-edit-fields">
+                    <label>${escapeHtml(tr('smart.tplName'))}</label>
+                    <input data-template-edit-name value="${escapeAttr(selectedPreset.name || '')}" placeholder="${escapeAttr(tr('smart.tplName'))}">
+                    <label>${escapeHtml(tr('smart.tplGroup'))}</label>
+                    <select data-template-edit-category>
+                        ${activeGroups.map(group => `<option value="${escapeAttr(group.id)}" ${group.id === (selectedPreset.category || selected?.category || 'mine') ? 'selected' : ''}>${escapeHtml(promptTemplateCategoryLabel(group.id))}</option>`).join('')}
+                    </select>
+                    <label>${escapeHtml(tr('smart.tplContent'))}</label>
+                    <textarea data-template-edit-text placeholder="${escapeAttr(tr('smart.tplContent'))}">${escapeHtml(selectedPreset.text || '')}</textarea>
+                </div>
+            ` : `
+                <div class="prompt-template-preview-content">
+                <div class="prompt-template-section">
+                    <label>${escapeHtml(tr('smart.tplPositive'))}</label>
+                    <p>${escapeHtml(selected?.positive || '')}</p>
+                </div>
+                ${selected?.negative ? `<div class="prompt-template-section">
+                    <label>${escapeHtml(tr('smart.tplNegative'))}</label>
+                    <p>${escapeHtml(selected.negative)}</p>
+                </div>` : ''}
+                ${Object.keys(selected?.params || {}).length ? `<div class="prompt-template-section">
+                    <label>${escapeHtml(tr('smart.tplParams'))}</label>
+                    <p>${escapeHtml(Object.entries(selected.params).map(([k,v]) => `${k}: ${v}`).join('\n'))}</p>
+                </div>` : ''}
+                </div>
+            `}
+            <div class="prompt-template-actions">
+                ${editMode ? `
+                    <button type="button" data-template-edit-cancel><i data-lucide="x"></i><span>${escapeHtml(tr('common.cancel'))}</span></button>
+                    <button type="button" class="danger" data-template-delete><i data-lucide="trash-2"></i><span>${escapeHtml(tr('common.delete'))}</span></button>
+                    <button type="button" class="primary" data-template-edit-save><i data-lucide="save"></i><span>${escapeHtml(tr('common.save'))}</span></button>
+                ` : `
+                    <button type="button" data-template-apply="positive"><i data-lucide="corner-down-left"></i><span>${escapeHtml(tr('smart.tplApplyPositive'))}</span></button>
+                    <button type="button" class="primary" data-template-apply="full"><i data-lucide="wand-sparkles"></i><span>${escapeHtml(tr('smart.tplApplyFull'))}</span></button>
+                `}
+            </div>
+            ` : `<div class="prompt-template-empty">${escapeHtml(tr('smart.tplPickOrCreate'))}</div>`}
+        </div>
+    `;
+    refreshIcons();
+    restorePromptTemplateScroll(scrollSnapshot);
+}
+function activePromptTemplateNodeId(){
+    return promptTemplatePanel?.classList?.contains('open') && promptTemplatePanel.dataset.target !== 'composer' ? (promptTemplatePanel.dataset.nodeId || '') : '';
+}
+function syncComposerTemplateButton(){
+    if(!composerTemplateBtn || !promptTemplatePanel) return;
+    const active = promptTemplatePanel.classList.contains('open') && promptTemplatePanel.dataset.target === 'composer';
+    composerTemplateBtn.classList.toggle('active', active);
+    composerTemplateBtn.setAttribute('aria-pressed', active ? 'true' : 'false');
+}
+function openPromptTemplatePanel(nodeId='', templateId='', options={}){
+    if(!promptTemplatePanel) return;
+    const target = options.target === 'composer' ? 'composer' : 'node';
+    promptTemplatePanel.dataset.target = target;
+    promptTemplatePanel.dataset.nodeId = nodeId || '';
+    if(promptTemplatePanel.parentElement !== shell) shell.appendChild(promptTemplatePanel);
+    if(templateId) promptTemplateSelectedId = templateId;
+    if(!promptTemplateSelectedId) promptTemplateSelectedId = promptTemplateItems()[0]?.id || '';
+    renderPromptTemplatePanel();
+    promptTemplatePanel.classList.add('open');
+    if(target === 'node' && nodeId){
+        selectedId = nodeId;
+        selectedIds = [];
+        selectedImage = {nodeId:'', index:-1};
+    }
+    render();
+    syncComposerTemplateButton();
+    promptTemplateSearch?.focus();
+}
+function closePromptTemplatePanel(){
+    promptTemplatePanel?.classList.remove('open');
+    syncComposerTemplateButton();
+    render();
+}
+function applyPromptTemplateToNode(mode='positive'){
+    const template = promptTemplateItems().find(item => item.id === promptTemplateSelectedId);
+    if(!template) return;
+    if(promptTemplatePanel?.dataset.target === 'composer'){
+        const text = promptTemplateText(template, mode);
+        setPromptText(text);
+        delete promptInput.dataset.preserveDraftOnce;
+        savePromptDraftForCurrent();
+        renderInputThumbsRow(selectedNode());
+        closePromptTemplatePanel();
+        scheduleSave();
+        return;
+    }
+    const node = nodes.find(n => n.id === promptTemplatePanel?.dataset.nodeId);
+    if(!node) return;
+    node.text = promptTemplateText(template, mode);
+    node.promptPresetId = template.builtin ? '' : template.sourceId || '';
+    closePromptTemplatePanel();
+    render();
+    scheduleSave();
+}
+async function saveCurrentPromptAsTemplate(){
+    const library = activePromptLibrary();
+    if(library.id === 'system' || library.readonly){ toast('请选择可编辑的提示词库'); return; }
+    const text = promptTemplatePanel?.dataset.target === 'composer'
+        ? promptPlainText()
+        : String(nodes.find(n => n.id === promptTemplatePanel?.dataset.nodeId)?.text || '').trim();
+    if(!text){ toast(tr('smart.promptPresetEmpty')); return; }
+    try {
+        const data = await fetch('/api/prompt-libraries/items', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({library_id:library.id, name:defaultPromptPresetName(text), category:promptTemplateCategory === 'all' ? 'mine' : promptTemplateCategory, positive:text, scene:'我的提示词预设'})
+        }).then(async r => {
+            if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '保存失败');
+            return r.json();
+        });
+        promptLibraries = data.library?.libraries || promptLibraries;
+        activePromptLibraryId = library.id;
+        promptTemplateCategory = data.item?.category || 'mine';
+        promptTemplateSelectedId = data.item?.id || '';
+        promptTemplateEditing = true;
+        renderPromptTemplatePanel({preserveScroll:false});
+    } catch(err) {
+        toast(err.message || '保存失败');
+    }
+}
+async function createBlankPromptTemplate(){
+    const library = activePromptLibrary();
+    if(library.id === 'system' || library.readonly){ toast('请选择可编辑的提示词库'); return; }
+    const category = promptTemplateCategory && promptTemplateCategory !== 'all' ? promptTemplateCategory : 'mine';
+    try {
+        const data = await fetch('/api/prompt-libraries/items', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({library_id:library.id, name:tr('smart.tplNewTemplateName'), category, positive:'新提示词', scene:'我的提示词预设'})
+        }).then(async r => {
+            if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '创建失败');
+            return r.json();
+        });
+        promptLibraries = data.library?.libraries || promptLibraries;
+        activePromptLibraryId = library.id;
+        promptTemplateCategory = category;
+        promptTemplateSelectedId = data.item?.id || '';
+        promptTemplateEditing = true;
+        renderPromptTemplatePanel({preserveScroll:false});
+    } catch(err) {
+        toast(err.message || '创建失败');
+    }
+}
+async function savePromptTemplateEdit(){
+    const item = promptTemplateSelectedItem();
+    if(!item) return;
+    const name = promptTemplatePanel.querySelector('[data-template-edit-name]')?.value?.trim() || '';
+    const text = promptTemplatePanel.querySelector('[data-template-edit-text]')?.value?.trim() || '';
+    const category = promptTemplatePanel.querySelector('[data-template-edit-category]')?.value || 'mine';
+    if(!name || !text){ toast(tr('smart.tplRequired')); return; }
+    if(item.remote){
+        try {
+            const data = await fetch(`/api/prompt-libraries/items/${encodeURIComponent(item.id)}`, {
+                method:'PATCH',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({library_id:item.libraryId || activePromptLibrary().id, name, category, positive:text, scene:item.scene || '', negative:item.negative || ''})
+            }).then(async r => {
+                if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '保存失败');
+                return r.json();
+            });
+            promptLibraries = data.library?.libraries || promptLibraries;
+            promptTemplateSelectedId = data.item?.id || item.id;
+        } catch(err) {
+            toast(err.message || '保存失败');
+            return;
+        }
+    } else if(item.builtin){
+        promptTemplateOverrides.editedBuiltins = promptTemplateOverrides.editedBuiltins || {};
+        promptTemplateOverrides.editedBuiltins[item.id] = {
+            ...(promptTemplateOverrides.editedBuiltins[item.id] || {}),
+            name,
+            positive:text,
+            category
+        };
+        savePromptTemplateOverrides();
+    } else {
+        const preset = currentPromptPreset(item.sourceId);
+        if(!preset) return;
+        const idx = promptPresets.findIndex(p => p.id === preset.id);
+        if(idx >= 0) promptPresets[idx] = {...promptPresets[idx], name, text, category, updatedAt:Date.now()};
+        savePromptPresets();
+        nodes.forEach(node => { if(node.promptPresetId === preset.id) node.text = text; });
+    }
+    promptTemplateEditing = false;
+    renderPromptTemplatePanel();
+    render();
+    scheduleSave();
+}
+async function deletePromptTemplate(){
+    const item = promptTemplateSelectedItem();
+    if(!item) return;
+    if(item.remote){
+        try {
+            const data = await fetch(`/api/prompt-libraries/items/${encodeURIComponent(item.id)}`, {method:'DELETE'}).then(async r => {
+                if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '删除失败');
+                return r.json();
+            });
+            promptLibraries = data.library?.libraries || promptLibraries;
+        } catch(err) {
+            toast(err.message || '删除失败');
+            return;
+        }
+    } else if(item.builtin){
+        promptTemplateOverrides.hiddenBuiltinIds = [...new Set([...(promptTemplateOverrides.hiddenBuiltinIds || []), item.id])];
+        savePromptTemplateOverrides();
+    } else {
+        promptPresets = promptPresets.filter(p => p.id !== item.sourceId);
+        nodes.forEach(node => { if(node.promptPresetId === item.sourceId) node.promptPresetId = ''; });
+        savePromptPresets();
+    }
+    promptTemplateSelectedId = '';
+    promptTemplateEditing = false;
+    renderPromptTemplatePanel({preserveScroll:false});
+    render();
+    scheduleSave();
+}
+async function createPromptTemplateGroup(){
+    const name = window.prompt(tr('smart.tplNewGroupPrompt'), tr('smart.tplNewGroupDefault'));
+    if(!String(name || '').trim()) return;
+    const lib = activePromptLibrary();
+    if(lib && lib.id !== 'system'){
+        try {
+            const data = await fetch('/api/prompt-libraries/categories', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({name:String(name).trim().slice(0, 24), library_id:lib.id})
+            }).then(async r => { if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '新增分组失败'); return r.json(); });
+            promptLibraries = data.library?.libraries || promptLibraries;
+            promptTemplateCategory = data.category?.id || promptTemplateCategory;
+            renderPromptTemplatePanel({preserveScroll:false});
+        } catch(err){ if(typeof setStatus === 'function') setStatus(err.message || '新增分组失败'); }
+        return;
+    }
+    const group = {id:uid('tpl_group'), name:String(name).trim().slice(0, 24)};
+    promptTemplateGroups.push(group);
+    savePromptTemplateGroups();
+    promptTemplateCategory = group.id;
+    renderPromptTemplatePanel({preserveScroll:false});
+}
+async function renamePromptTemplateGroup(groupId){
+    const lib = activePromptLibrary();
+    const group = activePromptTemplateGroups().find(g => g.id === groupId);
+    if(!group) return;
+    const name = window.prompt(tr('smart.tplGroupNamePrompt'), group.name || '');
+    if(!String(name || '').trim()) return;
+    if(lib && lib.id !== 'system'){
+        try {
+            const data = await fetch(`/api/prompt-libraries/categories/${encodeURIComponent(groupId)}`, {
+                method:'PATCH', headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({name:String(name).trim().slice(0, 24), library_id:lib.id})
+            }).then(async r => { if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '重命名失败'); return r.json(); });
+            promptLibraries = data.library?.libraries || promptLibraries;
+            renderPromptTemplatePanel();
+        } catch(err){ if(typeof setStatus === 'function') setStatus(err.message || '重命名失败'); }
+        return;
+    }
+    group.name = String(name).trim().slice(0, 24);
+    savePromptTemplateGroups();
+    renderPromptTemplatePanel();
+}
+async function deletePromptTemplateGroup(groupId){
+    const lib = activePromptLibrary();
+    if(lib && lib.id !== 'system'){
+        if(!window.confirm(tr('smart.tplDeleteGroupConfirm'))) return;
+        try {
+            const data = await fetch(`/api/prompt-libraries/categories/${encodeURIComponent(groupId)}`, {method:'DELETE'})
+                .then(async r => { if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '删除失败'); return r.json(); });
+            promptLibraries = data.library?.libraries || promptLibraries;
+            if(promptTemplateCategory === groupId) promptTemplateCategory = 'all';
+            renderPromptTemplatePanel({preserveScroll:false});
+        } catch(err){ if(typeof setStatus === 'function') setStatus(err.message || '删除失败'); }
+        return;
+    }
+    if(['view','storyboard','character','product','lighting','mine'].includes(groupId)){
+        renamePromptTemplateGroup(groupId);
+        return;
+    }
+    if(!window.confirm(tr('smart.tplDeleteGroupConfirm'))) return;
+    promptTemplateGroups = promptTemplateGroups.filter(g => g.id !== groupId);
+    promptPresets = promptPresets.map(p => p.category === groupId ? {...p, category:'mine'} : p);
+    Object.entries(promptTemplateOverrides.editedBuiltins || {}).forEach(([id, item]) => {
+        if(item?.category === groupId) promptTemplateOverrides.editedBuiltins[id] = {...item, category:'mine'};
+    });
+    if(promptTemplateCategory === groupId) promptTemplateCategory = 'all';
+    savePromptTemplateGroups();
+    savePromptPresets();
+    savePromptTemplateOverrides();
+    renderPromptTemplatePanel({preserveScroll:false});
+}
 function editPromptPresetForNode(node){
-    if(!promptPresets.length) savePromptNodeAsPreset(node);
-    else openPromptPresetPanel(node?.id || '', node?.promptPresetId || '');
+    openPromptTemplatePanel(node?.id || '', node?.promptPresetId ? `mine:${node.promptPresetId}` : '');
 }
 function assetCategories(type='image'){
-    return (assetLibrary.categories || []).filter(cat => (cat.type || 'image') === type);
+    const library = activeAssetLibrary();
+    return (library?.categories || assetLibrary.categories || []).filter(cat => (cat.type || 'image') === type);
+}
+function assetLibraries(){
+    return Array.isArray(assetLibrary.libraries) && assetLibrary.libraries.length ? assetLibrary.libraries : [{id:'default', name:'默认资产库', categories:assetLibrary.categories || []}];
+}
+function activeAssetLibrary(){
+    const libs = assetLibraries();
+    return libs.find(lib => lib.id === activeAssetLibraryId) || libs[0] || null;
 }
 function activeAssetCategory(){
     const cats = assetCategories('image');
@@ -2354,21 +3382,201 @@ function activeAssetCategory(){
 async function loadAssetLibrary(){
     try {
         const data = await fetch('/api/asset-library').then(r => r.json());
-        assetLibrary = data.library || {categories:[]};
-        if(!activeAssetCategoryId) activeAssetCategoryId = activeAssetCategory()?.id || '';
+        setAssetLibraryFromResponse(data, {render:false});
         renderAssetLibrary();
     } catch(e) {
         toast(tr('smart.assetLoadFail'));
     }
 }
-function setAssetLibraryFromResponse(data){
+function refreshAssetLibrarySoon(delay=120){
+    clearTimeout(assetLibraryRefreshTimer);
+    assetLibraryRefreshTimer = setTimeout(async () => {
+        await loadAssetLibrary();
+        if(mentionPicker?.classList?.contains('open') && mentionSource === 'asset') renderMentionPicker('asset');
+    }, delay);
+}
+function handleAssetLibraryUpdatedMessage(data={}){
+    const remoteUpdatedAt = Number(data.updated_at || 0);
+    if(remoteUpdatedAt && remoteUpdatedAt <= Number(assetLibraryUpdatedAt || 0)) return;
+    refreshAssetLibrarySoon();
+}
+// 多人协作同步：一个稳定的客户端 id，既用于 WS 连接，也随 saveCanvas 上报，
+// 服务器广播 canvas_updated 时带回 client_id，自己发的就忽略，避免自我刷新。
+const smartClientId = `canvas_smart_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`;
+let canvasSyncInFlight = false;
+let canvasSyncTimer = null;
+let canvasMetaPollTimer = null;
+function mergeSmartImageLists(localImgs, remoteImgs){
+    const out = [];
+    const seen = new Set();
+    (localImgs || []).forEach(img => {
+        const u = img && img.url;
+        if(u && seen.has(u)) return;
+        if(u) seen.add(u);
+        out.push(img);
+    });
+    (remoteImgs || []).forEach(img => {
+        const u = img && img.url;
+        if(!u || seen.has(u)) return;
+        seen.add(u);
+        out.push(img);
+    });
+    return out;
+}
+function smartNodeInFlight(node){
+    return Boolean(node && (node.running || node.pending || node.queued || node.jimengPending || smartPendingTasks(node).length));
+}
+function mergeSmartNode(local, remote){
+    // 本地正在生成/排队的节点完全以本地为准，只把对方可能多出来的图并进来，绝不被对方旧状态冲掉
+    if(smartNodeInFlight(local)){
+        return {...local, images:mergeSmartImageLists(local.images, remote.images)};
+    }
+    // 否则以对方（最新保存方）的布局/标题/设置为基底，但图片取并集——双方生成结果都不丢
+    return {...remote, images:mergeSmartImageLists(local.images, remote.images)};
+}
+function mergeSmartNodeLists(localNodes, remoteNodes){
+    const localById = new Map((localNodes || []).map(n => [n.id, n]));
+    const remoteById = new Map((remoteNodes || []).map(n => [n.id, n]));
+    const order = [];
+    const seen = new Set();
+    (localNodes || []).forEach(n => { if(!seen.has(n.id)){ seen.add(n.id); order.push(n.id); } });
+    (remoteNodes || []).forEach(n => { if(!seen.has(n.id)){ seen.add(n.id); order.push(n.id); } });
+    return order.map(id => {
+        const local = localById.get(id);
+        const remote = remoteById.get(id);
+        if(local && !remote) return local;     // 仅本地存在：保留（我新建的节点；对方删了也宁可复活也不丢结果）
+        if(remote && !local) return remote;     // 仅对方存在：加入对方新建的节点
+        return mergeSmartNode(local, remote);
+    }).filter(Boolean);
+}
+function mergeSmartConnections(localConns, remoteConns, nodeIds){
+    const out = [];
+    const seen = new Set();
+    [...(localConns || []), ...(remoteConns || [])].forEach(c => {
+        if(!c || !nodeIds.has(c.from) || !nodeIds.has(c.to)) return;
+        const key = `${c.from}->${c.to}:${c.kind || 'flow'}`;
+        if(seen.has(key)) return;
+        seen.add(key);
+        out.push(c);
+    });
+    return out;
+}
+function applyMergedServerCanvas(serverCanvas){
+    if(!serverCanvas || !canvas) return false;
+    const remoteNodes = (Array.isArray(serverCanvas.nodes) ? serverCanvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
+    const mergedNodes = mergeSmartNodeLists(nodes, remoteNodes);
+    const nodeIds = new Set(mergedNodes.map(n => n.id));
+    nodes = mergedNodes;
+    canvas.connections = mergeSmartConnections(canvas.connections, serverCanvas.connections, nodeIds);
+    canvas.updated_at = Number(serverCanvas.updated_at || canvas.updated_at || 0);
+    if(canvas.title !== serverCanvas.title && serverCanvas.title){
+        canvas.title = serverCanvas.title;
+        const titleEl = document.getElementById('smartTitle');
+        if(titleEl) titleEl.textContent = canvas.title;
+    }
+    render();
+    if(typeof refreshConnectionLayer === 'function') refreshConnectionLayer();
+    resumeSmartPendingTasks();
+    resumeJimengPendingNodes();
+    return true;
+}
+async function mergeReloadCanvasNow(){
+    if(!canvasId) return;
+    if(dragState || selectionState){
+        // 用户正在拖拽/框选，稍后再合并，别打断操作
+        scheduleCanvasMergeReload(600);
+        return;
+    }
+    try {
+        const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`);
+        if(!res.ok) return;
+        const data = await res.json();
+        if(data && data.canvas) applyMergedServerCanvas(data.canvas);
+    } catch(e) {}
+}
+function scheduleCanvasMergeReload(delay=200){
+    clearTimeout(canvasSyncTimer);
+    canvasSyncTimer = setTimeout(() => { mergeReloadCanvasNow(); }, delay);
+}
+function handleCanvasUpdatedMessage(data={}){
+    if(!data || data.type !== 'canvas_updated') return;
+    if(!canvasId || data.canvas_id !== canvasId) return;
+    if(data.client_id && data.client_id === smartClientId) return; // 自己发的，忽略
+    if(canvasSyncInFlight) return; // 我正在保存，保存完成/409 合并会处理
+    const remoteUpdatedAt = Number(data.updated_at || 0);
+    if(remoteUpdatedAt && remoteUpdatedAt <= Number(canvas?.updated_at || 0)) return;
+    scheduleCanvasMergeReload(200);
+}
+function startCanvasMetaPoll(){
+    // WS / iframe 转发不可靠时的兜底：定期看服务器 updated_at 是否变新，变新就合并拉取
+    if(canvasMetaPollTimer) return;
+    canvasMetaPollTimer = setInterval(async () => {
+        if(!canvasId || !canvas) return;
+        if(canvasSyncInFlight || dragState || selectionState) return;
+        try {
+            const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}/meta`);
+            if(!res.ok) return;
+            const meta = await res.json();
+            if(Number(meta.updated_at || 0) > Number(canvas.updated_at || 0)) mergeReloadCanvasNow();
+        } catch(e) {}
+    }, 8000);
+}
+function connectAssetLibrarySyncSocket(){
+    if(window.parent && window.parent !== window) return;
+    const host = window.location.host;
+    if(!host) return;
+    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    const clientId = smartClientId;
+    let socket;
+    let retryTimer = null;
+    const connect = () => {
+        try {
+            socket = new WebSocket(`${protocol}://${host}/ws/stats?client_id=${clientId}`);
+        } catch(e) {
+            retryTimer = setTimeout(connect, 3000);
+            return;
+        }
+        socket.onmessage = event => {
+            try {
+                const data = JSON.parse(event.data);
+                if(data?.type === 'asset_library_updated') handleAssetLibraryUpdatedMessage(data);
+                if(data?.type === 'canvas_updated') handleCanvasUpdatedMessage(data);
+            } catch(e) {}
+        };
+        socket.onclose = () => {
+            retryTimer = setTimeout(connect, 3000);
+        };
+        socket.onerror = () => {
+            try { socket.close(); } catch(e) {}
+        };
+    };
+    window.addEventListener('beforeunload', () => {
+        clearTimeout(retryTimer);
+        try { socket?.close(); } catch(e) {}
+    });
+    connect();
+}
+function setAssetLibraryFromResponse(data, options={}){
     assetLibrary = data.library || assetLibrary;
+    assetLibraryUpdatedAt = Number(assetLibrary.updated_at || assetLibraryUpdatedAt || 0);
+    const libs = assetLibraries();
+    if(!activeAssetLibraryId) activeAssetLibraryId = assetLibrary.active_library_id || libs[0]?.id || '';
+    if(activeAssetLibraryId && !libs.some(lib => lib.id === activeAssetLibraryId)) activeAssetLibraryId = libs[0]?.id || '';
+    const cats = assetCategories('image');
+    if(activeAssetCategoryId && !cats.some(cat => cat.id === activeAssetCategoryId)) activeAssetCategoryId = '';
     if(!activeAssetCategoryId) activeAssetCategoryId = activeAssetCategory()?.id || '';
-    renderAssetLibrary();
+    if(mentionAssetCategoryId && !cats.some(cat => cat.id === mentionAssetCategoryId)) mentionAssetCategoryId = '';
+    if(!mentionAssetCategoryId) mentionAssetCategoryId = activeAssetCategoryId;
+    if(options.render !== false) {
+        renderAssetLibrary();
+        if(mentionPicker?.classList?.contains('open') && mentionSource === 'asset') renderMentionPicker('asset');
+    }
 }
 function toggleAssetLibrary(open=!assetLibraryOpen){
+    if(!assetPanel || !assetToggle) return;
     assetLibraryOpen = !!open;
     assetPanel.classList.toggle('open', assetLibraryOpen);
+    assetToggle?.classList.toggle('active', assetLibraryOpen);
     if(assetLibraryOpen) loadAssetLibrary();
     render();
 }
@@ -2403,7 +3611,13 @@ function assetThumbHtml(item){
     return `<img class="asset-thumb" src="${thumb}" alt="">`;
 }
 function renderAssetLibrary(){
+    if(!assetPanel || !assetGrid || !assetCategorySelect) return;
     document.querySelectorAll('[data-asset-tab]').forEach(btn => btn.classList.toggle('active', btn.dataset.assetTab === assetTab));
+    const libs = assetLibraries();
+    if(!activeAssetLibraryId || !libs.some(lib => lib.id === activeAssetLibraryId)) activeAssetLibraryId = libs[0]?.id || '';
+    if(assetLibrarySelect){
+        assetLibrarySelect.innerHTML = libs.map(lib => `<option value="${escapeHtml(lib.id)}" ${lib.id === activeAssetLibraryId ? 'selected' : ''}>${escapeHtml(lib.name || '资产库')}</option>`).join('');
+    }
     const imageMode = assetTab === 'image';
     assetImageControls.style.display = imageMode ? 'block' : 'none';
     assetDropZone.style.display = imageMode ? 'flex' : 'none';
@@ -2428,26 +3642,34 @@ function renderAssetLibrary(){
     bindAssetItemEvents();
     refreshIcons();
 }
-function openAssetNameDialog({title='', value='', placeholder='', cancelValue='' }={}){
+function openAssetNameDialog({title='', value='', placeholder='', cancelValue='', multiline=false }={}){
+    if(!assetDialogBackdrop || !assetDialogInput || !assetDialogOk || !assetDialogCancel) return Promise.resolve(cancelValue);
     return new Promise(resolve => {
         assetDialogTitle.textContent = title || tr('smart.assetRename');
         assetDialogInput.value = value || '';
         assetDialogInput.placeholder = placeholder || '';
+        assetDialogInput.classList.toggle('is-multiline', Boolean(multiline));
+        assetDialogInput.rows = multiline ? 5 : 1;
+        assetDialogBackdrop.hidden = false;
         assetDialogBackdrop.classList.add('open');
         assetDialogInput.focus();
         assetDialogInput.select();
         const cleanup = result => {
             assetDialogBackdrop.classList.remove('open');
+            assetDialogBackdrop.hidden = true;
             assetDialogOk.onclick = null;
             assetDialogCancel.onclick = null;
             assetDialogInput.onkeydown = null;
             assetDialogBackdrop.onmousedown = null;
+            assetDialogInput.classList.remove('is-multiline');
+            assetDialogInput.rows = 1;
             resolve(result);
         };
         assetDialogOk.onclick = () => cleanup(assetDialogInput.value.trim());
         assetDialogCancel.onclick = () => cleanup(cancelValue);
         assetDialogInput.onkeydown = event => {
-            if(event.key === 'Enter') cleanup(assetDialogInput.value.trim());
+            if(event.key === 'Enter' && !multiline) cleanup(assetDialogInput.value.trim());
+            if(event.key === 'Enter' && multiline && (event.ctrlKey || event.metaKey)) cleanup(assetDialogInput.value.trim());
             if(event.key === 'Escape') cleanup(cancelValue);
         };
         assetDialogBackdrop.onmousedown = event => {
@@ -2456,7 +3678,7 @@ function openAssetNameDialog({title='', value='', placeholder='', cancelValue=''
     });
 }
 function positionAssetHoverPreview(event){
-    if(!assetHoverPreview || assetHoverPreview.style.display === 'none') return;
+    if(!assetHoverPreview || assetHoverPreview.hidden || assetHoverPreview.style.display === 'none') return;
     const pad = 14;
     const w = assetHoverPreview.offsetWidth || 260;
     const h = assetHoverPreview.offsetHeight || 300;
@@ -2495,16 +3717,71 @@ function showAssetHoverPreview(event, item){
         media.alt = 'asset preview';
     }
     name.textContent = item.name || 'asset';
+    assetHoverPreview.hidden = false;
     assetHoverPreview.style.display = 'block';
     positionAssetHoverPreview(event);
 }
 function hideAssetHoverPreview(){
     if(!assetHoverPreview) return;
     assetHoverPreview.style.display = 'none';
+    assetHoverPreview.hidden = true;
     const media = assetHoverPreview.querySelector('img,video');
     media?.pause?.();
     media?.removeAttribute('src');
     media?.load?.();
+}
+function beginAssetInlineRename(assetId){
+    const item = (activeAssetCategory()?.items || []).find(x => x.id === assetId);
+    const card = [...assetGrid.querySelectorAll('.asset-item')].find(el => el.dataset.assetId === assetId);
+    const nameEl = card?.querySelector('.asset-name');
+    if(!item || !card || !nameEl || card.querySelector('.asset-rename-input')) return;
+    hideAssetHoverPreview();
+    const previousName = item.name || 'asset';
+    const input = document.createElement('input');
+    input.className = 'asset-rename-input';
+    input.type = 'text';
+    input.value = previousName;
+    input.setAttribute('aria-label', tr('smart.assetRename'));
+    card.draggable = false;
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const restore = () => {
+        if(input.isConnected) input.replaceWith(nameEl);
+        card.draggable = true;
+    };
+    const finish = async save => {
+        if(done) return;
+        done = true;
+        const name = input.value.trim();
+        if(!save || !name || name === previousName){
+            restore();
+            return;
+        }
+        input.disabled = true;
+        try {
+            const data = await fetch(`/api/asset-library/items/${encodeURIComponent(assetId)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}).then(r => r.json());
+            setAssetLibraryFromResponse(data);
+        } catch(err){
+            restore();
+            toast(err.message || tr('smart.assetAddFail'));
+        }
+    };
+    input.addEventListener('keydown', event => {
+        event.stopPropagation();
+        if(event.key === 'Enter'){
+            event.preventDefault();
+            finish(true);
+        } else if(event.key === 'Escape'){
+            event.preventDefault();
+            finish(false);
+        }
+    });
+    input.addEventListener('pointerdown', event => event.stopPropagation());
+    input.addEventListener('mousedown', event => event.stopPropagation());
+    input.addEventListener('click', event => event.stopPropagation());
+    input.addEventListener('blur', () => finish(true));
 }
 function bindAssetItemEvents(){
     assetGrid.querySelectorAll('.asset-item').forEach(el => {
@@ -2522,26 +3799,27 @@ function bindAssetItemEvents(){
     assetGrid.querySelectorAll('[data-rename-asset]').forEach(btn => {
         btn.onclick = async e => {
             e.preventDefault(); e.stopPropagation();
-            const item = (activeAssetCategory()?.items || []).find(x => x.id === btn.dataset.renameAsset);
-            const name = await openAssetNameDialog({title:tr('smart.assetRename'), value:item?.name || '', placeholder:tr('smart.assetRename')});
-            if(!name) return;
-            const data = await fetch(`/api/asset-library/items/${encodeURIComponent(btn.dataset.renameAsset)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}).then(r => r.json());
-            setAssetLibraryFromResponse(data);
+            beginAssetInlineRename(btn.dataset.renameAsset);
         };
     });
     assetGrid.querySelectorAll('[data-delete-asset]').forEach(btn => {
         btn.onclick = async e => {
             e.preventDefault(); e.stopPropagation();
-            if(!confirm(tr('smart.assetDeleteConfirm'))) return;
-            const data = await fetch(`/api/asset-library/items/${encodeURIComponent(btn.dataset.deleteAsset)}`, {method:'DELETE'}).then(r => r.json());
-            setAssetLibraryFromResponse(data);
+            btn.disabled = true;
+            try {
+                const data = await fetch(`/api/asset-library/items/${encodeURIComponent(btn.dataset.deleteAsset)}`, {method:'DELETE'}).then(r => r.json());
+                setAssetLibraryFromResponse(data);
+            } catch(err){
+                btn.disabled = false;
+                toast(err.message || tr('smart.assetAddFail'));
+            }
         };
     });
 }
 async function addUrlToAssetLibrary(url, name=''){
     const cat = activeAssetCategory();
     if(!cat){ toast(tr('smart.assetNoFolder')); return; }
-    const data = await fetch('/api/asset-library/items', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({category_id:cat.id, url, name})}).then(async r => {
+    const data = await fetch('/api/asset-library/items', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeAssetLibraryId, category_id:cat.id, url, name})}).then(async r => {
         if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || tr('smart.assetAddFail'));
         return r.json();
     });
@@ -2584,6 +3862,8 @@ async function loadCanvas(){
         applyViewport();
         render();
         resumeSmartPendingTasks();
+        resumeJimengPendingNodes();
+        startCanvasMetaPoll();
     } catch(e) { toast(tr('smart.toastCanvasFail')); }
 }
 function scheduleSave(){
@@ -2594,35 +3874,54 @@ async function saveCanvas(){
     if(!canvasId || !canvas) return;
     savePromptDraftForCurrent();
     nodes.forEach(node => {
-        node.images = (node.images || []).map(img => stripImageGenerationMeta(img));
+        node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
+        if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
     });
     canvas.nodes = nodes;
-    canvas.settings = cloneSmartSettings(canvasDefaultSmartSettings || initialSmartSettings);
+    canvas.settings = settingsForStorage(canvasDefaultSmartSettings || initialSmartSettings);
     canvas.viewport = {...viewport};
+    const storageCanvas = canvasForStorage();
+    canvasSyncInFlight = true;
     try {
         const res = await fetch(`/api/canvases/${encodeURIComponent(canvasId)}`, {
             method:'PUT',
             headers:{'Content-Type':'application/json'},
             body:JSON.stringify({
-                title:canvas.title || tr('smart.title'),
-                icon:canvas.icon || 'sparkles',
-                nodes,
-                connections:canvas.connections || [],
-                viewport:canvas.viewport || {x:0,y:0,scale:1},
-                logs:canvas.logs || [],
-                settings:canvas.settings,
-                base_updated_at:canvas.updated_at || 0
+                title:storageCanvas.title || tr('smart.title'),
+                icon:storageCanvas.icon || 'sparkles',
+                nodes:storageCanvas.nodes || [],
+                connections:storageCanvas.connections || [],
+                viewport:storageCanvas.viewport || {x:0,y:0,scale:1},
+                logs:storageCanvas.logs || [],
+                settings:storageCanvas.settings,
+                base_updated_at:storageCanvas.updated_at || canvas.updated_at || 0,
+                client_id:smartClientId
             })
         });
         if(res.ok){
             const data = await res.json();
-            if(data.canvas) canvas = {...canvas, ...data.canvas};
+            if(data.canvas && data.canvas.updated_at) canvas.updated_at = data.canvas.updated_at;
         } else if(res.status === 409) {
+            // 冲突：别人先保存了。合并对方的状态（节点 id 合并、图片取并集，谁都不丢），
+            // 然后用对方最新的 updated_at 作为基底重存，把合并结果落盘——而不是直接覆盖对方。
             const data = await res.json().catch(() => ({}));
-            if(data.detail?.updated_at) canvas.updated_at = data.detail.updated_at;
+            const serverCanvas = data.detail?.canvas;
+            if(serverCanvas){
+                applyMergedServerCanvas(serverCanvas);
+                nodes.forEach(node => {
+                    node.images = (node.images || []).map(img => mediaItemForStorage(stripImageGenerationMeta(img)));
+                    if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
+                });
+                canvas.nodes = nodes;
+            } else if(data.detail?.updated_at) {
+                canvas.updated_at = data.detail.updated_at;
+            }
+            clearTimeout(saveTimer);
             saveTimer = setTimeout(saveCanvas, 300);
         }
-    } catch(e) {}
+    } catch(e) {} finally {
+        canvasSyncInFlight = false;
+    }
 }
 function imageMetaFromNode(node){
     return {};
@@ -2637,7 +3936,7 @@ function inheritNodeMetaFromImage(node){
 function createNode(x, y, images=[], options={}){
     if(!options.skipUndo) pushUndo();
     const nodeImages = (images || []).map(img => ({...img}));
-    const node = {id:uid('smart'), type:'smart-image', x, y, title:nodeImages.length > 1 ? 'Group' : nodeImages.length ? 'Image' : '上传卡片', images:nodeImages, created_at:Date.now()};
+    const node = {id:uid('smart'), type:'smart-image', x, y, title:nodeImages.length > 1 ? 'Group' : nodeImages.length ? 'Image' : tr('smart.createImportNode'), images:nodeImages, created_at:Date.now()};
     node.scale = nodeImages.length > 1 ? MEDIA_GROUP_DEFAULT_SCALE : mediaNodeDefaultScale(node);
     inheritNodeMetaFromImage(node);
     nodes.push(node);
@@ -2793,7 +4092,7 @@ function renderConnections(){
         const isHistory = kind === 'history';
         const isInsertPreview = loopInsertPreview?.index === conn.index;
         const edgeKey = `${conn.from}->${conn.to}`;
-        const cascadeState = smartCascadeRunPath?.states?.[edgeKey] || '';
+        const cascadeState = smartCascadeEdgeState(edgeKey);
         const isCascade = !isHistory && (cascadeKeys.has(edgeKey) || Boolean(cascadeState) || isInsertPreview);
         const isPendingLine = Boolean(toNode.pending && !isCascade);
         const fx = isHistory ? fr.x + fr.width / 2 : fr.x + fr.width;
@@ -2934,6 +4233,29 @@ function mediaKindForItem(img){
     if(isVideoMediaItem(img)) return 'video';
     return 'image';
 }
+function localDisplayUrlForMediaItem(img){
+    if(!img) return '';
+    const candidates = [
+        img.originalLocalUrl,
+        img.localUrl,
+        img.sourceUrl,
+        img.local_url,
+        img.source_url,
+        img.url
+    ];
+    const local = candidates.find(url => url && !/^https?:\/\//i.test(String(url)));
+    return local || img.url || '';
+}
+function imageForDisplay(img){
+    if(!img || typeof img !== 'object') return img;
+    const localUrl = localDisplayUrlForMediaItem(img);
+    if(!localUrl || localUrl === img.url) return img;
+    return {
+        ...img,
+        url:localUrl,
+        originalLocalUrl:img.originalLocalUrl || localUrl
+    };
+}
 function resultMediaUrls(result){
     const urls = [];
     const add = value => {
@@ -2977,8 +4299,16 @@ function mediaKindForUrls(urls, fallback='image'){
 function imageRefsOnly(refs){
     return (refs || []).filter(ref => ref?.url && mediaKindForItem(ref) === 'image');
 }
+function looksLikeImageMediaUrl(url){
+    const text = String(url || '').trim().toLowerCase();
+    if(!text) return false;
+    if(text.startsWith('data:image/')) return true;
+    if(text.startsWith('asset://')) return false;
+    const path = text.split('?', 1)[0].split('#', 1)[0];
+    return /\.(png|jpe?g|webp|gif|bmp|tiff)$/i.test(path);
+}
 function videoRefsOnly(refs){
-    return (refs || []).filter(ref => ref?.url && mediaKindForItem(ref) === 'video');
+    return (refs || []).filter(ref => ref?.url && mediaKindForItem(ref) === 'video' && !looksLikeImageMediaUrl(ref.url));
 }
 function isRemoteVideoReferenceUrl(url){
     return /^https?:\/\//i.test(String(url || '')) || /^asset:\/\//i.test(String(url || ''));
@@ -2990,7 +4320,7 @@ function thumbMediaHtml(img){
     if(isFileMediaItem(img) || isTextMediaItem(img)) return `<div class="media-thumb file-thumb" data-media-url="${escapeAttr(img.url || '')}" data-media-kind="${escapeAttr(mediaKindForItem(img))}"><i data-lucide="${isTextMediaItem(img) ? 'file-text' : 'file'}"></i><span>${escapeHtml(img.name || (isTextMediaItem(img) ? 'Text' : 'File'))}</span></div>`;
     if(isAudioMediaItem(img)) return `<div class="media-thumb audio-thumb" data-media-url="${escapeAttr(img.url || '')}" data-media-kind="audio"><i data-lucide="file-audio"></i><span>${escapeHtml(img.name || 'Audio')}</span></div>`;
     if(isVideoMediaItem(img)) return `<div class="media-thumb video-thumb"><video src="${escapeHtml(img.url)}" data-url="${escapeHtml(img.url)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video></div>`;
-    return `<img src="${escapeHtml(img.url)}" draggable="false">`;
+    return `<img src="${escapeHtml(displayMediaUrl(img))}" data-original-src="${escapeAttr(img.url || '')}" draggable="false">`;
 }
 function imageResolutionLabel(img){
     const w = Number(img?.natural_w || img?.width || img?.w || 0);
@@ -3035,7 +4365,7 @@ function singleMediaHtml(img, w, h){
     if(isFileMediaItem(img) || isTextMediaItem(img)) return `<div class="node-img media-card media-file-card" style="width:${w}px;height:${h}px"><div class="media-card-icon"><i data-lucide="${isTextMediaItem(img) ? 'file-text' : 'file'}"></i></div><div class="media-card-title">${escapeHtml(img.name || (isTextMediaItem(img) ? 'Text' : 'File'))}</div><div class="media-card-sub">${isTextMediaItem(img) ? 'TEXT' : 'FILE'}</div></div>`;
     if(isAudioMediaItem(img)) return `<div class="node-img media-card media-audio-card" style="width:${w}px;height:${h}px"><div class="media-card-icon"><i data-lucide="file-audio"></i></div><div class="media-card-title">${escapeHtml(img.name || 'Audio')}</div><div class="media-card-sub">AUDIO</div><audio src="${escapeAttr(img.url || '')}" data-url="${escapeAttr(img.url || '')}" controls preload="metadata"></audio></div>`;
     if(isVideoMediaItem(img)) return `<div class="node-img media-card media-video-card" style="width:${w}px;height:${h}px"><video src="${escapeHtml(img.url)}" data-url="${escapeHtml(img.url)}" controls muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video></div>`;
-    return `<img class="node-img" src="${escapeHtml(img.url)}" draggable="false" style="width:${w}px;height:${h}px">`;
+    return `<img class="node-img" src="${escapeHtml(displayMediaUrl(img))}" data-original-src="${escapeAttr(img.url || '')}" draggable="false" style="width:${w}px;height:${h}px">`;
 }
 function smartNodeHasLiveMedia(node){
     return Boolean(!node?.pending && (node?.images || []).some(img => isVideoMediaItem(img) || isAudioMediaItem(img)));
@@ -3046,7 +4376,7 @@ function mediaSignaturePartFromElement(itemEl){
     if(media){
         const tag = media.tagName.toLowerCase();
         const kind = tag === 'video' ? 'video' : tag === 'audio' ? 'audio' : 'image';
-        const url = media.dataset?.url || media.getAttribute('src') || '';
+        const url = media.dataset?.url || media.dataset?.originalSrc || media.getAttribute('src') || '';
         return `${kind}:${url}`;
     }
     const audioThumb = itemEl?.querySelector?.('.audio-thumb[data-media-url]');
@@ -3127,22 +4457,70 @@ function smartRunTaskLabel(run){
         return labels[s.comfyMode || 'text'] || 'ComfyUI';
     }
     if(s.engine === 'modelscope'){
-        return s.msgenModel === 'custom' ? (s.msCustomModel || 'ModelScope') : (MS_GEN_MODELS[s.msgenModel]?.label || s.msgenModel || 'ModelScope');
+        return s.msgenModel === 'custom' ? (s.msCustomModel || 'Modelscope') : (MS_GEN_MODELS[s.msgenModel]?.label || s.msgenModel || 'Modelscope');
     }
     return s.model || 'API Image';
 }
 function outputUrlLooksVideo(url){
     return /\.(mp4|webm|mov|m4v)(\?|$)/.test(String(url || '').toLowerCase());
 }
+function proxiedMediaUrl(itemOrUrl, name=''){
+    const url = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
+    if(!url || String(url).startsWith('/assets/') || String(url).startsWith('/output/') || String(url).startsWith('data:') || String(url).startsWith('blob:')) return url;
+    const filename = name || (typeof itemOrUrl === 'object' ? (itemOrUrl.name || '') : '') || fileNameFromUrl(url) || 'preview';
+    return `/api/download-output?inline=1&url=${encodeURIComponent(url)}&name=${encodeURIComponent(filename)}`;
+}
+function displayMediaUrl(itemOrUrl, name=''){
+    const url = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
+    if(/^https?:\/\//i.test(String(url || ''))) return proxiedMediaUrl(itemOrUrl, name);
+    return url;
+}
+function bindImageProxyFallback(imgEl, itemOrUrl){
+    if(!imgEl || imgEl.dataset.proxyFallbackBound === '1') return;
+    imgEl.dataset.proxyFallbackBound = '1';
+    imgEl.addEventListener('error', () => {
+        if(imgEl.dataset.proxyFallbackTried === '1') return;
+        const fallback = proxiedMediaUrl(itemOrUrl);
+        if(!fallback || fallback === imgEl.getAttribute('src')) return;
+        imgEl.dataset.proxyFallbackTried = '1';
+        imgEl.src = fallback;
+    });
+}
 function safeExportFileName(name, fallback='download.zip'){
     const cleaned = String(name || fallback).replace(/[\\/:*?"<>|]+/g, '_').trim();
     return cleaned || fallback;
+}
+function fileNameFromUrl(url=''){
+    try {
+        const parsed = new URL(String(url || ''), window.location.href);
+        return decodeURIComponent(parsed.pathname.split('/').filter(Boolean).pop() || '');
+    } catch(e) {
+        return decodeURIComponent(String(url || '').split('?')[0].split('#')[0].split('/').filter(Boolean).pop() || '');
+    }
+}
+function extensionForMediaItem(item, fallback='.png'){
+    const source = [item?.name, item?.url].map(value => String(value || '').split('?')[0].split('#')[0]).find(value => /\.[a-z0-9]{2,8}$/i.test(value));
+    if(source) return source.match(/(\.[a-z0-9]{2,8})$/i)?.[1] || fallback;
+    const kind = mediaKindForItem(item);
+    if(kind === 'video') return '.mp4';
+    if(kind === 'audio') return '.mp3';
+    if(kind === 'text') return '.txt';
+    return fallback;
+}
+function downloadNameForMediaItem(item, fallbackPrefix='canvas-output'){
+    const localName = fileNameFromUrl(item?.url || '');
+    const preferred = localName || item?.name || '';
+    const ext = extensionForMediaItem(item);
+    const randomName = `${fallbackPrefix}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}${ext}`;
+    let name = safeExportFileName(preferred || randomName, randomName);
+    if(!/\.[a-z0-9]{2,8}$/i.test(name)) name += ext;
+    return name;
 }
 function downloadPreviewImage(){
     const node = nodes.find(n => n.id === previewNavState.nodeId);
     const image = node?.images?.[previewNavState.index];
     if(!image?.url) return;
-    const name = image.name || image.url.split('/').pop() || 'image.png';
+    const name = downloadNameForMediaItem(image, 'image');
     const link = document.createElement('a');
     link.href = `/api/download-output?url=${encodeURIComponent(image.url)}&name=${encodeURIComponent(name)}`;
     link.download = name;
@@ -3152,7 +4530,7 @@ function downloadPreviewImage(){
 }
 function downloadPreviewFile(item){
     if(!item?.url) return;
-    const name = item.name || item.url.split('/').pop() || 'output';
+    const name = downloadNameForMediaItem(item, 'output');
     const link = document.createElement('a');
     link.href = `/api/download-output?url=${encodeURIComponent(item.url)}&name=${encodeURIComponent(name)}`;
     link.download = name;
@@ -3162,7 +4540,17 @@ function downloadPreviewFile(item){
 }
 function previewDownloadGroupItems(){
     const node = nodes.find(n => n.id === previewNavState.nodeId);
-    return (node?.images || []).filter(item => item?.url);
+    return (node?.images || [])
+        .filter(item => item?.url)
+        .map((item, index) => ({...item, __index:index}))
+        .sort((a, b) => {
+            const ga = a.grid || {};
+            const gb = b.grid || {};
+            const rowDiff = Number(ga.row ?? a.__index) - Number(gb.row ?? b.__index);
+            if(rowDiff) return rowDiff;
+            const colDiff = Number(ga.col ?? a.__index) - Number(gb.col ?? b.__index);
+            return colDiff || a.__index - b.__index;
+        });
 }
 async function downloadPreviewGroup(){
     const node = nodes.find(n => n.id === previewNavState.nodeId);
@@ -3173,7 +4561,11 @@ async function downloadPreviewGroup(){
         const response = await fetch('/api/canvas-assets/download', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({filename, urls:items.map(item => item.url).filter(Boolean)})
+            body:JSON.stringify({
+                filename,
+                urls:items.map(item => item.url).filter(Boolean),
+                items:items.map((item, index) => ({url:item.url, name:downloadNameForMediaItem(item, `image-${String(index + 1).padStart(2, '0')}`)}))
+            })
         });
         if(!response.ok) throw new Error((await response.text()) || '批量下载失败');
         const blob = await response.blob();
@@ -3192,14 +4584,14 @@ async function downloadPreviewGroup(){
 function smartRunPlatformLabel(run){
     const s = run?.settings || {};
     if(s.engine === 'comfy') return 'ComfyUI';
-    if(s.engine === 'modelscope') return 'ModelScope';
+    if(s.engine === 'modelscope') return 'Modelscope';
     if(run?.kind === 'video') return videoProviderById(s.videoProvider || '')?.name || s.videoProvider || 'Video';
     return apiProviderById(s.provider_id || '')?.name || s.provider_id || 'API';
 }
 function smartRunRequestMeta(run){
     const s = run?.settings || {};
     if(s.engine === 'comfy') return {workflow_json:s.comfyWorkflow || '', mode:s.comfyMode || 'text'};
-    if(s.engine === 'modelscope') return {backend:'ModelScope', model:s.msgenModel || '', custom_model:s.msCustomModel || ''};
+    if(s.engine === 'modelscope') return {backend:'Modelscope', model:s.msgenModel || '', custom_model:s.msCustomModel || ''};
     if(run?.kind === 'video') return {provider_id:s.videoProvider || '', model:s.videoModel || '', duration:s.videoDuration || '', aspect_ratio:s.videoAspect || '', resolution:s.videoResolution || ''};
     return {provider_id:s.provider_id || '', model:s.model || '', size:run?.size || '', quality:s.quality || '', n:s.count || 1};
 }
@@ -3212,7 +4604,7 @@ function smartRunSnapshot(node, prompt, refs=[], kind='image'){
         settings:settingsSnapshot,
         prompt:prompt || '',
         refs:(refs || []).map(ref => ({url:ref.url || '', name:ref.name || 'image', kind:ref.kind || ''})).filter(ref => ref.url),
-        size: kind === 'image' && settingsSnapshot.engine === 'api' ? sizeForRun() : ''
+        size: kind === 'image' && isApiLikeEngine(settingsSnapshot.engine) ? sizeForRun(settingsSnapshot) : ''
     };
 }
 function addSmartGenerationLog({run, outputs=[], runMs=0, error=''}) {
@@ -3325,11 +4717,10 @@ function promptNodeBodyHtml(node){
     node.llmProvider = resolveChatProviderId(node.llmProvider || '');
     node.llmModel = resolveChatModel(node.llmModel || '', node.llmProvider);
     node.llmSystemEnabled = node.llmSystemEnabled === true;
-    if(node.promptPresetId && !promptPresets.some(p => p.id === node.promptPresetId)) node.promptPresetId = '';
-    const presetOptions = `<option value="">${escapeHtml(tr('smart.promptPreset'))}</option>${promptPresets.map(p => `<option value="${escapeHtml(p.id)}" ${p.id === node.promptPresetId ? 'selected' : ''}>${escapeHtml(p.name || tr('smart.promptPresetUnnamed'))}</option>`).join('')}`;
     const readonly = node.llmEnabled ? 'readonly' : '';
     const systemPrompt = (node.llmSystemPrompt || '').trim();
     const inputThumbs = smartNodeInputThumbsHtml(promptNodeInputImages(node));
+    const templateActive = activePromptTemplateNodeId() === node.id;
     const llmParams = node.llmEnabled ? `
         <div class="prompt-node-llm">
             <select class="prompt-node-control prompt-llm-provider">${chatProviderOptions(node.llmProvider)}</select>
@@ -3344,9 +4735,7 @@ function promptNodeBodyHtml(node){
     return `<div class="prompt-node-card">
         <textarea class="prompt-node-text prompt-node-control" ${readonly} placeholder="${escapeHtml(tr('smart.promptPlaceholderNode'))}">${escapeHtml(node.text || '')}</textarea>
         <div class="prompt-node-tools">
-            <select class="prompt-node-control prompt-node-preset-select">${presetOptions}</select>
-            <button class="prompt-node-pill prompt-node-control prompt-preset-save" type="button"><i data-lucide="save"></i><span>${escapeHtml(tr('common.save'))}</span></button>
-            <button class="prompt-node-pill prompt-node-control prompt-preset-edit" type="button"><i data-lucide="pencil"></i><span>${escapeHtml(tr('common.edit'))}</span></button>
+            <button class="prompt-node-pill prompt-node-control prompt-preset-edit ${templateActive ? 'active' : ''}" type="button"><i data-lucide="library"></i><span>模板库</span></button>
             <button class="prompt-node-pill prompt-llm-toggle ${node.llmEnabled ? 'active' : ''}" type="button"><i data-lucide="sparkles"></i><span>LLM</span></button>
         </div>
         ${node.llmEnabled ? inputThumbs : ''}
@@ -3430,6 +4819,9 @@ function smartLoopBodyHtml(node){
         : tr('smart.loopPromptHintVariable');
     const currentUpstreamPrompt = smartLoopSelectedInputPrompt(node, {index:node.loopStart});
     const defaultPrompt = tr('smart.loopDefaultPrompt') || '现在生成第《计数》张卖点图片';
+    const loopRunState = smartCascadeRunForLoop(node.id);
+    const loopRunning = Boolean(loopRunState);
+    const loopStopping = Boolean(loopRunState?.stopRequested);
     return `<div class="loop-smart-card ${node.imageInput ? 'has-image' : ''} ${node.showPrompt ? 'has-prompt' : ''}">
         <div class="loop-smart-row loop-smart-top">
             <div class="loop-smart-seg">
@@ -3469,14 +4861,17 @@ function smartLoopBodyHtml(node){
         <div class="loop-smart-footer">
             ${loopNumberControlHtml({label:tr('canvas.loopImageStart'), value:node.loopStart, key:'loopStart', max:9999, quick:[1,2,3,4,5,6,8,10]})}
             ${loopNumberControlHtml({label:tr('canvas.loopCount'), value:node.count, key:'count', max:100, quick:[1,2,3,4,5,6,8,10]})}
-            <button class="loop-smart-control loop-smart-run" type="button" data-loop-run="${escapeHtml(node.id)}" ${smartCascadeRunning && smartCascadeActiveLoopId === node.id ? 'disabled' : ''}><i data-lucide="workflow"></i><span>${escapeHtml(smartCascadeRunning && smartCascadeActiveLoopId === node.id ? tr('common.running') : tr('smart.loopRunAll'))}</span></button>
+            <button class="loop-smart-control loop-smart-run ${loopRunning ? 'is-stop' : ''}" type="button" data-loop-run="${escapeHtml(node.id)}" ${loopStopping ? 'disabled' : ''}><i data-lucide="${loopRunning ? 'square' : 'workflow'}"></i><span>${escapeHtml(loopRunning ? smartCascadeStopText(loopStopping) : tr('smart.loopRunAll'))}</span></button>
         </div>
     </div>`;
 }
 function nodeBodyHtml(node, layout){
     if(node.type === 'smart-prompt') return promptNodeBodyHtml(node);
     if(node.type === 'smart-loop') return smartLoopBodyHtml(node);
-    const imgs = node.images || [];
+    const imgs = (node.images || []).map(imageForDisplay);
+    if(node.jimengPending && node.jimengPending.submitId && imgs.length === 0){
+        return jimengPendingBodyHtml(node, layout);
+    }
     if(node.queued && imgs.length === 0 && !node.pending){
         return `<div class="loading-cell single queued" style="width:${layout.width}px;height:${layout.height}px"></div>`;
     }
@@ -3491,8 +4886,21 @@ function nodeBodyHtml(node, layout){
     if(imgs[0]) return `<div class="image-wrap ${selectedImage.nodeId === node.id && selectedImage.index === 0 ? 'image-selected' : ''}" data-image-index="0" data-media-signature="${escapeAttr(`${mediaKindForItem(imgs[0])}:${imgs[0]?.url || ''}`)}" style="--node-img-w:${layout.width}px;--node-img-h:${layout.height}px">${singleMediaHtml(imgs[0], layout.width, layout.height)}${imageResolutionBadgeHtml(imgs[0])}<button class="mini-x image-delete" type="button" data-image-index="0" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button></div>`;
     return `<div class="node-drop" data-upload-action="files">
         <span class="upload-node-main"><i data-lucide="upload-cloud"></i></span>
-        <span class="upload-node-title">上传卡片</span>
+        <span class="upload-node-title">${escapeHtml(tr('smart.createImportNode'))}</span>
         <span class="upload-node-sub">拖拽 / 粘贴 / 点击上传</span>
+    </div>`;
+}
+function jimengPendingBodyHtml(node, layout){
+    const jp = node.jimengPending || {};
+    const querying = Boolean(jp.querying);
+    const queueText = jimengQueueText(jp.queueInfo);
+    return `<div class="jimeng-pending-cell loading-cell single" style="width:${layout.width}px;height:${layout.height}px">
+        <div class="jimeng-pending-overlay">
+            <div class="jimeng-pending-spinner"><i data-lucide="loader-2"></i></div>
+            <div class="jimeng-pending-text">${escapeHtml(queueText)}</div>
+            <div class="jimeng-pending-sub">任务未丢失，可继续等待或手动查询</div>
+            <button class="jimeng-pending-query" type="button" data-jimeng-query="${escapeAttr(node.id)}" ${querying ? 'disabled' : ''}><i data-lucide="${querying ? 'loader-2' : 'refresh-cw'}"></i><span>${querying ? '查询中…' : '查询结果'}</span></button>
+        </div>
     </div>`;
 }
 function nowMs(){ return Date.now(); }
@@ -3510,19 +4918,19 @@ function nodeRunElapsedMs(node){
 }
 function runTimePillHtml(node){
     if(!node || node.runTimerHidden || node.type === 'smart-prompt') return '';
-    const running = Boolean(node.pending || node.running);
+    const running = Boolean(node.pending || node.running || node.jimengPending);
     if(!running && !node.runFinishedAt) return '';
     const cls = running ? '' : ' done';
     return `<span class="run-time-pill${cls}" data-run-timer="${escapeHtml(node.id)}">${formatRunDuration(nodeRunElapsedMs(node))}</span>`;
 }
 function hideRunTimerForNode(node){
-    if(!node || node.runTimerHidden || node.pending || node.running || !node.runFinishedAt) return false;
+    if(!node || node.runTimerHidden || node.pending || node.running || node.jimengPending || !node.runFinishedAt) return false;
     node.runTimerHidden = true;
     scheduleSave();
     return true;
 }
 function refreshRunTimerPills(){
-    const active = nodes.some(n => n.type !== 'smart-prompt' && !n.runTimerHidden && (n.pending || n.running || n.runFinishedAt));
+    const active = nodes.some(n => n.type !== 'smart-prompt' && !n.runTimerHidden && (n.pending || n.running || n.jimengPending || n.runFinishedAt));
     document.querySelectorAll('[data-run-timer]').forEach(el => {
         const node = nodes.find(n => n.id === el.dataset.runTimer);
         if(!node || node.runTimerHidden || node.type === 'smart-prompt') {
@@ -3530,7 +4938,7 @@ function refreshRunTimerPills(){
             return;
         }
         el.textContent = formatRunDuration(nodeRunElapsedMs(node));
-        el.classList.toggle('done', Boolean(!node.pending && !node.running && node.runFinishedAt));
+        el.classList.toggle('done', Boolean(!node.pending && !node.running && !node.jimengPending && node.runFinishedAt));
     });
     if(active && !runTimerInterval) runTimerInterval = setInterval(refreshRunTimerPills, 1000);
     if(!active && runTimerInterval){ clearInterval(runTimerInterval); runTimerInterval = null; }
@@ -3545,17 +4953,18 @@ function render(){
     });
     const nodeHtmlEntries = nodes.map(node => {
         const imgs = node.images || [];
-        const title = node.type === 'smart-prompt' ? 'Prompt' : node.type === 'smart-loop' ? 'Loop' : (imgs.length > 1 ? 'Group' : imgs.length ? 'Image' : '上传卡片');
+        const title = node.type === 'smart-prompt' ? 'Prompt' : node.type === 'smart-loop' ? 'Loop' : (imgs.length > 1 ? 'Group' : imgs.length ? 'Image' : escapeHtml(tr('smart.createImportNode')));
         const scale = nodeScale(node);
         const layout = imageLayout(imgs, scale, node);
         const isPrompt = node.type === 'smart-prompt';
         const isLoop = node.type === 'smart-loop';
         const isImageNode = node.type === 'smart-image' || !node.type;
-        const isQueued = Boolean(node.queued && imgs.length === 0 && !node.pending);
-        const isEmpty = isImageNode && imgs.length === 0 && !node.pending && !isQueued;
+        const isJimengPending = Boolean(node.jimengPending && node.jimengPending.submitId && imgs.length === 0);
+        const isQueued = Boolean(node.queued && imgs.length === 0 && !node.pending && !isJimengPending);
+        const isEmpty = isImageNode && imgs.length === 0 && !node.pending && !isQueued && !isJimengPending;
         const isHistory = isHistoryGroupNode(node);
         const isGroup = isImageNode && imgs.length > 1;
-        const isPending = (node.pending || isQueued) && imgs.length === 0;
+        const isPending = ((node.pending || isQueued || isJimengPending) && imgs.length === 0);
         const body = nodeBodyHtml(node, layout);
         const deleteBtn = `<button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button>`;
         const hint = isPending ? escapeHtml(tr('smart.hintPending')) : (imgs.length > 1 ? escapeHtml(tr('smart.hintMulti')) : imgs.length ? escapeHtml(tr('smart.hintSingle')) : escapeHtml(tr('smart.hintEmpty')));
@@ -3565,7 +4974,7 @@ function render(){
             ${runTimePillHtml(node)}
             <div class="node-body">${body}</div>
             <div class="node-hint">${hint}</div>
-            ${imgs.length || node.pending || isQueued || isPrompt || isLoop ? '<div class="node-resize-handle" data-resize="1"></div>' : ''}
+            ${imgs.length || node.pending || isQueued || isJimengPending || isPrompt || isLoop ? '<div class="node-resize-handle" data-resize="1"></div>' : ''}
             <div class="node-port port-in" data-port="in" title="input"></div>
             <div class="node-port port-out" data-port="out" title="output"></div>
         </div>`;
@@ -3649,6 +5058,7 @@ function measureSmartNodeImages(){
         const node = nodes.find(n => n.id === nodeEl?.dataset.id);
         const index = Number(itemEl?.dataset.imageIndex ?? 0);
         const image = node?.images?.[index];
+        if(imgEl.tagName?.toLowerCase() === 'img' && image?.url) bindImageProxyFallback(imgEl, image);
         if(!node || !image || image.natural_w || image.natural_h) return;
         const apply = () => {
             const w = imgEl.naturalWidth || imgEl.videoWidth || 0;
@@ -3718,21 +5128,6 @@ function bindPromptNodeControls(el, node){
         bindScrollableText(textEl);
         textEl.oninput = e => { node.text = e.target.value; scheduleSave(); };
     }
-    const presetSelect = el.querySelector('.prompt-node-preset-select');
-    if(presetSelect) presetSelect.onchange = e => {
-        e.stopPropagation();
-        const preset = currentPromptPreset(e.target.value);
-        node.promptPresetId = preset?.id || '';
-        if(preset) node.text = preset.text || '';
-        render();
-        scheduleSave();
-    };
-    const presetSave = el.querySelector('.prompt-preset-save');
-    if(presetSave) presetSave.onclick = e => {
-        e.preventDefault();
-        e.stopPropagation();
-        savePromptNodeAsPreset(node);
-    };
     const presetEdit = el.querySelector('.prompt-preset-edit');
     if(presetEdit) presetEdit.onclick = e => {
         e.preventDefault();
@@ -3922,7 +5317,12 @@ function bindLoopNodeControls(el, node){
         btn.onclick = e => {
             e.preventDefault();
             e.stopPropagation();
-            runSmartCascadeFromLoop(btn.dataset.loopRun || node.id);
+            const loopId = btn.dataset.loopRun || node.id;
+            if(smartCascadeIsLoopRunning(loopId)){
+                requestSmartCascadeStop(loopId);
+                return;
+            }
+            runSmartCascadeFromLoop(loopId);
         };
     });
 }
@@ -4091,7 +5491,7 @@ function bindNodeEvents(){
             selectedId = id;
             selectedIds = [];
             selectedImage = {nodeId:'', index:-1};
-            if(smartCascadeRunning) smartCascadeSilentSelection = false;
+        if(smartCascadeAnyRunning()) smartCascadeSilentSelection = false;
             render();
         };
         el.ondblclick = e => e.stopPropagation();
@@ -4119,6 +5519,13 @@ function bindNodeEvents(){
                 deleteNodeFromButton(id);
             });
         });
+        el.querySelectorAll('[data-jimeng-query]').forEach(btn => {
+            btn.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); }, true);
+            btn.addEventListener('click', e => {
+                e.preventDefault(); e.stopPropagation();
+                queryJimengNow(btn.dataset.jimengQuery);
+            });
+        });
         el.querySelectorAll('.image-delete').forEach(btn => {
             btn.addEventListener('click', e => {
                 e.preventDefault(); e.stopPropagation();
@@ -4141,7 +5548,7 @@ function bindNodeEvents(){
                 selectedId = id;
                 selectedIds = [];
                 selectedImage = {nodeId:id, index:Number(item.dataset.imageIndex || 0)};
-                openImageEditor(id, Number(item.dataset.imageIndex || 0));
+                openImagePreview(id, Number(item.dataset.imageIndex || 0));
             }, true);
             item.addEventListener('click', e => {
                 if(e.target.closest('.image-delete')) return;
@@ -4156,7 +5563,7 @@ function bindNodeEvents(){
                     selectedId = id;
                     selectedIds = [];
                     selectedImage = {nodeId:id, index:imageIndex};
-                    openImageEditor(id, imageIndex);
+                    openImagePreview(id, imageIndex);
                     return;
                 }
                 clearImageClickTimer();
@@ -4171,7 +5578,7 @@ function bindNodeEvents(){
                 selectedImage = isGroupOwner
                     ? {nodeId:'', index:-1}
                     : {nodeId:id, index:imageIndex};
-                    if(smartCascadeRunning) smartCascadeSilentSelection = false;
+                    if(smartCascadeAnyRunning()) smartCascadeSilentSelection = false;
                     syncSelectionUi();
                     updateComposer();
                 }, 220);
@@ -4186,7 +5593,7 @@ function bindNodeEvents(){
             selectedId = id;
             selectedIds = [];
             selectedImage = {nodeId:id, index:Number(item.dataset.imageIndex || 0)};
-            openImageEditor(id, Number(item.dataset.imageIndex || 0));
+            openImagePreview(id, Number(item.dataset.imageIndex || 0));
         }, true);
         });
         el.querySelectorAll('.thumb-item').forEach(item => {
@@ -4332,7 +5739,7 @@ function clearNodeMediaBeforeDelete(id){
     node.images = [];
     node.pending = 0;
     node.running = false;
-    node.title = '上传卡片';
+    node.title = tr('smart.createImportNode');
     delete node.w;
     delete node.h;
     const history = historyGroupForNode(node);
@@ -4436,7 +5843,7 @@ function deleteImage(id, imageIndex){
 function currentEditImage(){
     const node = nodes.find(n => n.id === cropState?.nodeId);
     const index = Number(cropState?.imageIndex || 0);
-    return {node, index, image:node?.images?.[index]};
+    return {node, index, image:imageForDisplay(node?.images?.[index])};
 }
 function cropImageDisplaySize(){
     const img = document.getElementById('cropImage');
@@ -4452,6 +5859,291 @@ function cropBounds(){
     return cropImageDisplaySize();
 }
 function editDrawCanvas(){ return document.getElementById('editDrawCanvas'); }
+function editTextCanvas(){ return document.getElementById('editTextCanvas'); }
+function editTextContext(){ return editTextCanvas()?.getContext('2d') || null; }
+function selectedEditTextItem(){ return editTextItems.find(item => item.id === editTextSelectedId) || null; }
+function defaultEditTextText(){ return window.StudioI18n?.lang?.() === 'en' ? 'Double-click to edit' : '双击编辑'; }
+function editTextSizeFromBrush(){ return Math.max(14, Math.min(120, Math.round(editBrushSize() * 2))); }
+function createEditTextItem(text, point, preset={}){
+    const size = Math.max(10, Math.min(120, Number(preset.size) || editTextSizeFromBrush()));
+    return {id:uid('txt'), text:String(text || defaultEditTextText()).trim(), x:Number(point?.x || 0), y:Number(point?.y || 0), color:preset.color || brushColor(), size};
+}
+function textItemFont(item){
+    const size = Math.max(10, Math.min(120, Number(item?.size) || 28));
+    return `900 ${size}px Arial, sans-serif`;
+}
+function measureEditTextItem(item, ctx=editTextContext()){
+    if(!item || !ctx) return {x:0, y:0, w:0, h:0};
+    const size = Math.max(10, Math.min(120, Number(item.size) || 28));
+    ctx.save();
+    ctx.font = textItemFont(item);
+    const metrics = ctx.measureText(String(item.text || ''));
+    ctx.restore();
+    const width = Math.max(1, metrics.width || 1);
+    const ascent = Number.isFinite(metrics.actualBoundingBoxAscent) ? metrics.actualBoundingBoxAscent : size * 0.8;
+    const descent = Number.isFinite(metrics.actualBoundingBoxDescent) ? metrics.actualBoundingBoxDescent : size * 0.25;
+    const pad = Math.max(4, Math.round(size * 0.18));
+    return {x:item.x - width / 2 - pad, y:item.y - (ascent + descent) / 2 - pad, w:width + pad * 2, h:ascent + descent + pad * 2, textW:width, textH:ascent + descent, pad};
+}
+function hitEditTextItem(point){
+    const ctx = editTextContext();
+    if(!ctx) return null;
+    for(let i = editTextItems.length - 1; i >= 0; i--){
+        const item = editTextItems[i];
+        const box = measureEditTextItem(item, ctx);
+        if(point.x >= box.x && point.x <= box.x + box.w && point.y >= box.y && point.y <= box.y + box.h) return item;
+    }
+    return null;
+}
+function renderEditTextCanvas(){
+    const canvasEl = editTextCanvas();
+    const ctx = editTextContext();
+    if(!canvasEl || !ctx) return;
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    editTextItems.forEach(item => {
+        if(!item?.text) return;
+        const selected = item.id === editTextSelectedId;
+        const box = measureEditTextItem(item, ctx);
+        ctx.save();
+        ctx.font = textItemFont(item);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = item.color || brushColor();
+        ctx.strokeStyle = 'rgba(255,255,255,.92)';
+        ctx.lineWidth = Math.max(2, (Number(item.size) || 28) / 8);
+        ctx.strokeText(String(item.text || ''), item.x, item.y);
+        ctx.fillText(String(item.text || ''), item.x, item.y);
+        if(selected){
+            ctx.setLineDash([7, 5]);
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = 'rgba(15,23,42,.72)';
+            ctx.strokeRect(box.x, box.y, box.w, box.h);
+            ctx.setLineDash([]);
+            ctx.fillStyle = 'rgba(15,23,42,.92)';
+            ctx.beginPath();
+            ctx.arc(item.x + box.w / 2 - box.pad, item.y - box.h / 2 + box.pad, 3.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.restore();
+    });
+    positionEditTextInlineEditor();
+}
+function syncTextToolState(force=false){
+    const cropCanvasEl = document.getElementById('cropCanvas');
+    cropCanvasEl?.classList.toggle('text-mode', imageEditMode === 'brush' && brushTool === 'text');
+}
+function syncSelectedEditTextStyleFromBrush(){
+    if(imageEditMode !== 'brush' || brushTool !== 'text' || editTextInlineEditor) return;
+    const item = selectedEditTextItem();
+    if(!item) return;
+    const nextSize = editTextSizeFromBrush();
+    const nextColor = brushColor();
+    if(item.size === nextSize && item.color === nextColor) return;
+    beginTextEditChange();
+    item.size = nextSize;
+    item.color = nextColor;
+    renderEditTextCanvas();
+    syncTextToolState(true);
+}
+function beginTextEditChange(){
+    if(editTextDirty) return;
+    pushEditDrawHistory();
+    editTextDirty = true;
+}
+function setSelectedEditTextItem(id){
+    editTextSelectedId = id || '';
+    renderEditTextCanvas();
+    syncTextToolState(true);
+}
+function confirmSelectedEditTextItem(){
+    const selected = selectedEditTextItem();
+    if(!selected) return false;
+    if(!String(selected.text || '').trim()) editTextItems = editTextItems.filter(item => item.id !== selected.id);
+    editTextSelectedId = '';
+    editTextDrag = null;
+    editTextDirty = false;
+    renderEditTextCanvas();
+    syncTextToolState(true);
+    return true;
+}
+function editTextCanvasScale(){
+    const canvasEl = editTextCanvas();
+    const rect = canvasEl?.getBoundingClientRect?.();
+    return {x:(rect?.width || canvasEl?.width || 1) / Math.max(1, canvasEl?.width || 1), y:(rect?.height || canvasEl?.height || 1) / Math.max(1, canvasEl?.height || 1), rect};
+}
+function selectInlineEditorText(el){
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+}
+function inlineEditorText(){
+    return String(editTextInlineEditor?.el?.innerText || editTextInlineEditor?.el?.textContent || '').replace(/\u00a0/g, ' ');
+}
+function autosizeEditTextInlineEditor(){
+    const editor = editTextInlineEditor;
+    if(!editor?.el) return;
+    const el = editor.el;
+    el.style.width = 'auto';
+    el.style.height = 'auto';
+    el.style.width = `${Math.max(Number(editor.minW || 48), el.scrollWidth + 10)}px`;
+    el.style.height = `${Math.max(Number(editor.minH || 28), el.scrollHeight + 4)}px`;
+}
+function positionEditTextInlineEditor(){
+    const editor = editTextInlineEditor;
+    if(!editor?.el) return;
+    const item = editTextItems.find(x => x.id === editor.itemId);
+    const canvasEl = editTextCanvas();
+    const cropCanvasEl = document.getElementById('cropCanvas');
+    if(!item || !canvasEl || !cropCanvasEl) return;
+    const box = measureEditTextItem(item, editTextContext());
+    const scale = editTextCanvasScale();
+    const hostRect = cropCanvasEl.getBoundingClientRect();
+    const canvasRect = scale.rect || canvasEl.getBoundingClientRect();
+    const left = canvasRect.left - hostRect.left + box.x * scale.x;
+    const top = canvasRect.top - hostRect.top + box.y * scale.y;
+    const w = Math.max(48, box.w * scale.x);
+    const h = Math.max(28, box.h * scale.y);
+    editor.minW = w;
+    editor.minH = h;
+    editor.el.style.left = `${left}px`;
+    editor.el.style.top = `${top}px`;
+    editor.el.style.minWidth = `${w}px`;
+    editor.el.style.minHeight = `${h}px`;
+    editor.el.style.font = `900 ${Math.max(10, (Number(item.size) || 28) * scale.y)}px Arial, sans-serif`;
+    editor.el.style.color = item.color || brushColor();
+    autosizeEditTextInlineEditor();
+}
+function removeEditTextInlineEditor(commit=true){
+    const editor = editTextInlineEditor;
+    if(!editor) return;
+    const item = editTextItems.find(x => x.id === editor.itemId);
+    const next = inlineEditorText().trim();
+    editTextInlineEditor = null;
+    editor.el.remove();
+    if(!item) return;
+    if(commit){
+        if(next !== String(editor.before || '')){
+            beginTextEditChange();
+            if(next) item.text = next;
+            else {
+                editTextItems = editTextItems.filter(x => x.id !== item.id);
+                editTextSelectedId = '';
+            }
+        }
+    } else {
+        item.text = editor.before || item.text || defaultEditTextText();
+    }
+    editTextDirty = false;
+    renderEditTextCanvas();
+    syncTextToolState(true);
+}
+function beginEditTextInline(item){
+    if(!item) return;
+    removeEditTextInlineEditor(true);
+    editTextSelectedId = item.id;
+    const host = document.getElementById('cropCanvas');
+    if(!host) return;
+    const el = document.createElement('div');
+    el.className = 'edit-text-inline';
+    el.contentEditable = 'true';
+    el.spellcheck = false;
+    el.textContent = item.text || defaultEditTextText();
+    host.appendChild(el);
+    editTextInlineEditor = {el, itemId:item.id, before:item.text || ''};
+    positionEditTextInlineEditor();
+    el.addEventListener('input', autosizeEditTextInlineEditor);
+    el.addEventListener('keydown', event => {
+        if(event.key === 'Enter' && !event.shiftKey){ event.preventDefault(); removeEditTextInlineEditor(true); }
+        else if(event.key === 'Escape'){ event.preventDefault(); removeEditTextInlineEditor(false); }
+    });
+    el.addEventListener('blur', () => removeEditTextInlineEditor(true));
+    requestAnimationFrame(() => { el.focus(); selectInlineEditorText(el); });
+    renderEditTextCanvas();
+    syncTextToolState(true);
+}
+function editTextPoint(event){ return editDrawPoint(event); }
+function beginEditText(event){
+    if(imageEditMode !== 'brush' || brushTool !== 'text') return;
+    event.preventDefault(); event.stopPropagation();
+    removeEditTextInlineEditor(true);
+    const canvasEl = editTextCanvas();
+    const point = editTextPoint(event);
+    const hit = hitEditTextItem(point);
+    if(hit){
+        editTextSelectedId = hit.id;
+        editTextDrag = {id:hit.id, pointerId:event.pointerId, startX:hit.x, startY:hit.y, sx:event.clientX, sy:event.clientY, moved:false, hasHistory:false};
+        canvasEl.setPointerCapture?.(event.pointerId);
+        canvasEl.style.cursor = 'grabbing';
+        syncTextToolState(true);
+        renderEditTextCanvas();
+        return;
+    }
+    if(selectedEditTextItem()){
+        confirmSelectedEditTextItem();
+        return;
+    }
+    beginTextEditChange();
+    const item = createEditTextItem(defaultEditTextText(), point, {color:brushColor(), size:editTextSizeFromBrush()});
+    editTextItems.push(item);
+    editTextSelectedId = item.id;
+    canvasEl.style.cursor = 'text';
+    renderEditTextCanvas();
+    syncTextToolState(true);
+}
+function updateEditTextCursor(event){
+    const canvasEl = editTextCanvas();
+    if(!canvasEl || imageEditMode !== 'brush' || brushTool !== 'text') return;
+    const hit = hitEditTextItem(editTextPoint(event));
+    canvasEl.style.cursor = hit ? 'move' : 'text';
+}
+function moveEditText(event){
+    if(!editTextDrag){
+        updateEditTextCursor(event);
+        return;
+    }
+    event.preventDefault(); event.stopPropagation();
+    const item = editTextItems.find(x => x.id === editTextDrag.id);
+    if(!item) return;
+    const dx = event.clientX - editTextDrag.sx;
+    const dy = event.clientY - editTextDrag.sy;
+    if(!editTextDrag.moved && Math.abs(dx) + Math.abs(dy) < 2) return;
+    editTextDrag.moved = true;
+    if(!editTextDrag.hasHistory){
+        beginTextEditChange();
+        editTextDrag.hasHistory = true;
+    }
+    const canvasEl = editTextCanvas();
+    const rect = canvasEl?.getBoundingClientRect?.();
+    const scaleX = canvasEl ? canvasEl.width / Math.max(1, rect?.width || canvasEl.width) : 1;
+    const scaleY = canvasEl ? canvasEl.height / Math.max(1, rect?.height || canvasEl.height) : 1;
+    item.x = editTextDrag.startX + dx * scaleX;
+    item.y = editTextDrag.startY + dy * scaleY;
+    renderEditTextCanvas();
+}
+function endEditText(event){
+    if(editTextDrag && event?.pointerId != null) editTextCanvas()?.releasePointerCapture?.(event.pointerId);
+    editTextDrag = null;
+    editTextDirty = false;
+    renderEditTextCanvas();
+    syncTextToolState(true);
+    if(event) updateEditTextCursor(event);
+}
+function editTextHasContent(){ return editTextItems.some(item => String(item?.text || '').trim().length > 0); }
+function resizeEditTextCanvas(){
+    const img = document.getElementById('cropImage');
+    const canvasEl = editTextCanvas();
+    if(!img || !canvasEl) return;
+    const display = cropImageDisplaySize();
+    const w = Math.max(1, img.naturalWidth || img.clientWidth || 1);
+    const h = Math.max(1, img.naturalHeight || img.clientHeight || 1);
+    if(canvasEl.width !== w) canvasEl.width = w;
+    if(canvasEl.height !== h) canvasEl.height = h;
+    canvasEl.style.width = `${display.w}px`;
+    canvasEl.style.height = `${display.h}px`;
+    renderEditTextCanvas();
+}
 function resizeEditDrawCanvas(){
     const img = document.getElementById('cropImage');
     const canvasEl = editDrawCanvas();
@@ -4461,40 +6153,61 @@ function resizeEditDrawCanvas(){
     if(canvasEl.width !== w || canvasEl.height !== h){ canvasEl.width = w; canvasEl.height = h; }
     canvasEl.style.width = `${display.w}px`;
     canvasEl.style.height = `${display.h}px`;
+    resizeEditTextCanvas();
     if(imageEditMode === 'grid') refreshGridSplitPreview();
 }
 function setImageEditMode(mode, userTouched=false){
+    const editKind = mediaKindForItem(currentEditImage().image || {});
+    const isVideoPreview = editKind === 'video';
+    if(isVideoPreview && mode !== 'preview') mode = 'preview';
     if(userTouched) imageEditModeTouched = true;
     const prev = imageEditMode;
+    if(mode !== 'brush') removeEditTextInlineEditor(true);
     imageEditMode = ['preview','crop','outpaint','mask','brush','grid'].includes(mode) ? mode : 'preview';
     const cropCanvasEl = document.getElementById('cropCanvas');
     const previewStageEl = document.getElementById('previewStage');
     const editStageEl = document.getElementById('imageEditStage');
+    const editPanelEl = document.querySelector('.image-edit-panel');
     const previewDownloadBtn = document.getElementById('previewDownloadBtn');
     const previewDownloadAllBtn = document.getElementById('previewDownloadAllBtn');
+    const modeBar = document.querySelector('.image-edit-mode');
+    const videoFrameTools = document.getElementById('videoFrameTools');
+    const zoomLabel = document.getElementById('imageEditZoomLabel');
+    const cancelBtn = document.getElementById('imageEditCancelBtn');
     const isPreview = imageEditMode === 'preview';
+    if(!isPreview && panoramaState.enabled) disposePanoramaPreview();
     cropCanvasEl.style.display = isPreview ? 'none' : '';
     previewStageEl.style.display = isPreview ? 'inline-flex' : 'none';
     editStageEl?.classList.toggle('preview-mode', isPreview);
+    editPanelEl?.classList.toggle('video-preview-mode', isVideoPreview);
     if(previewDownloadBtn) previewDownloadBtn.style.display = isPreview ? 'inline-flex' : 'none';
-    if(previewDownloadAllBtn) previewDownloadAllBtn.style.display = isPreview && previewDownloadGroupItems().length > 1 ? 'inline-flex' : 'none';
+    if(previewDownloadAllBtn) previewDownloadAllBtn.style.display = isPreview && !isVideoPreview && previewDownloadGroupItems().length > 1 ? 'inline-flex' : 'none';
+    if(modeBar) modeBar.style.display = isVideoPreview ? 'none' : '';
+    if(videoFrameTools) videoFrameTools.style.display = isVideoPreview && isPreview ? 'flex' : 'none';
+    if(zoomLabel) zoomLabel.style.display = isVideoPreview ? 'none' : '';
+    if(cancelBtn){
+        cancelBtn.style.display = '';
+        cancelBtn.textContent = isVideoPreview ? '关闭' : tr('common.cancel');
+    }
     cropCanvasEl.classList.toggle('mask-mode', imageEditMode === 'mask');
     cropCanvasEl.classList.toggle('brush-mode', imageEditMode === 'brush');
     cropCanvasEl.classList.toggle('grid-mode', imageEditMode === 'grid');
     cropCanvasEl.classList.toggle('outpaint-mode', imageEditMode === 'outpaint');
     syncGridCustomCursor();
     document.querySelectorAll('[data-image-edit-mode]').forEach(btn => btn.classList.toggle('active', btn.dataset.imageEditMode === imageEditMode));
-    document.getElementById('imagePreviewTools').classList.toggle('active', isPreview);
+    document.getElementById('imagePreviewTools').classList.toggle('active', isPreview && !isVideoPreview);
     document.getElementById('imageMaskTools').classList.toggle('active', imageEditMode === 'mask');
     document.getElementById('imageBrushTools').classList.toggle('active', imageEditMode === 'brush');
     document.getElementById('imageGridTools').classList.toggle('active', imageEditMode === 'grid');
     syncGridGapValue();
     const applyBtn = document.getElementById('imageEditApplyBtn');
-    document.getElementById('compareToggleBtn').style.display = isPreview ? 'inline-flex' : 'none';
+    document.getElementById('compareToggleBtn').style.display = isPreview && !isVideoPreview ? 'inline-flex' : 'none';
+    document.getElementById('panoramaToggleBtn').style.display = isPreview && !isVideoPreview ? 'inline-flex' : 'none';
+    document.getElementById('panoramaExportBtn').style.display = isPreview && !isVideoPreview && panoramaState.enabled ? 'inline-flex' : 'none';
     document.getElementById('compareThumbs').style.display = 'none';
     if(isPreview){
-        document.getElementById('imageEditTitle').textContent = tr('smart.previewImage');
-        document.getElementById('imageEditSub').textContent = tr('smart.previewHint');
+        document.getElementById('imageEditTitle').textContent = isVideoPreview ? '预览视频' : tr('smart.previewImage');
+        document.getElementById('imageEditSub').textContent = isVideoPreview ? '' : tr('smart.previewHint');
         applyBtn.style.display = 'none';
         refreshComparePanel();
     } else {
@@ -4525,6 +6238,7 @@ function setImageEditMode(mode, userTouched=false){
     else if(imageEditMode === 'crop' || imageEditMode === 'outpaint' || prev === 'grid') clearEditDrawing(true);
     syncEditDrawingHistoryButtons();
     syncBrushToolButtons();
+    syncTextToolState(true);
     refreshIcons();
 }
 let previewCompareOn = false;
@@ -4533,7 +6247,7 @@ let previewMetaExtraText = '';
 function applyPreviewTransform(){
     const frame = document.getElementById('previewFrame');
     if(frame){
-        frame.style.transform = `translate(${previewPan.x}px, ${previewPan.y}px) scale(${previewZoom})`;
+        frame.style.transform = panoramaState.enabled ? '' : `translate(${previewPan.x}px, ${previewPan.y}px) scale(${previewZoom})`;
     }
     updateZoomLabel();
 }
@@ -4543,6 +6257,348 @@ function resetPreviewTransform(){
     previewComparePos = 50;
     document.getElementById('previewStage')?.style.setProperty('--compare-pos', `${previewComparePos}%`);
     applyPreviewTransform();
+}
+function panoramaRatioValue(){
+    const preset = PANORAMA_RATIO_PRESETS[panoramaState.ratio];
+    if(preset) return preset;
+    return {
+        w:Math.max(1, Number(panoramaState.customW) || 16),
+        h:Math.max(1, Number(panoramaState.customH) || 9)
+    };
+}
+function panoramaResolutionValue(){
+    const longSide = 1536;
+    const ratio = panoramaRatioValue();
+    const aspect = ratio.w / Math.max(1, ratio.h);
+    if(aspect >= 1){
+        return {w:longSide, h:Math.max(1, Math.round(longSide / aspect))};
+    }
+    return {w:Math.max(1, Math.round(longSide * aspect)), h:longSide};
+}
+function panoramaSource(){
+    const editing = currentEditImage();
+    const image = editing.image || {};
+    if(mediaKindForItem(image) !== 'image') return '';
+    return displayMediaUrl(image.url ? image : (image.url || ''));
+}
+function panoramaFallbackSource(){
+    const image = currentEditImage().image || {};
+    return image?.url ? proxiedMediaUrl(image) : '';
+}
+function isLikelyPanoramaImage(node, image, naturalW=0, naturalH=0){
+    if(mediaKindForItem(image || {}) !== 'image') return false;
+    const text = [
+        image?.name,
+        image?.title,
+        node?.title,
+        node?.runPrompt,
+        node?.runModelPrompt,
+        node?.promptDraftText,
+        node?.runSettings?.ratio,
+        node?.runSettings?.msRatio,
+        node?.runSettings?.size,
+        node?.runSettings?.customSize
+    ].filter(Boolean).join(' ');
+    if(/(?:360|全景|环景|panorama|equirect|spherical|vr\b)/i.test(text)) return true;
+    const w = Number(naturalW || image?.natural_w || image?.width || image?.w || 0);
+    const h = Number(naturalH || image?.natural_h || image?.height || image?.h || 0);
+    if(!(w > 0 && h > 0)) return false;
+    const aspect = w / h;
+    return aspect >= 1.9 && aspect <= 2.1;
+}
+async function ensurePanoramaRenderer(){
+    const canvas = document.getElementById('panoramaCanvas');
+    if(!canvas) return false;
+    if(!panoramaState.three){
+        panoramaState.threeLoadPromise = panoramaState.threeLoadPromise || import('/static/vendor/js/three-0.160.0.module.js?v=2026.05.30');
+        panoramaState.three = await panoramaState.threeLoadPromise;
+    }
+    const THREE = panoramaState.three;
+    if(!panoramaState.renderer){
+        panoramaState.renderer = new THREE.WebGLRenderer({
+            canvas,
+            antialias:true,
+            alpha:false,
+            preserveDrawingBuffer:true
+        });
+        panoramaState.renderer.setPixelRatio(1);
+        panoramaState.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    }
+    if(!panoramaState.scene){
+        panoramaState.scene = new THREE.Scene();
+        panoramaState.camera = new THREE.PerspectiveCamera(panoramaState.fov, 16 / 9, 1, 1200);
+        const geometry = new THREE.SphereGeometry(500, 96, 64);
+        geometry.scale(-1, 1, 1);
+        const material = new THREE.MeshBasicMaterial({color:0xffffff});
+        panoramaState.sphere = new THREE.Mesh(geometry, material);
+        panoramaState.scene.add(panoramaState.sphere);
+    }
+    return Boolean(panoramaState.renderer && panoramaState.scene && panoramaState.camera && panoramaState.sphere);
+}
+function applyPanoramaTexture(img){
+    const THREE = panoramaState.three;
+    if(!THREE || !panoramaState.sphere || !img?.naturalWidth || !img?.naturalHeight) return false;
+    if(panoramaState.texture){
+        panoramaState.texture.dispose?.();
+        panoramaState.texture = null;
+    }
+    const texture = new THREE.Texture(img);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    panoramaState.texture = texture;
+    panoramaState.sphere.material.map = texture;
+    panoramaState.sphere.material.needsUpdate = true;
+    return true;
+}
+function drawPanoramaFrame(){
+    const canvas = document.getElementById('panoramaCanvas');
+    const img = panoramaState.image;
+    const {renderer, scene, camera, sphere, three:THREE} = panoramaState;
+    if(!panoramaState.enabled || !canvas || !renderer || !scene || !camera || !sphere || !THREE || !img?.naturalWidth || !img?.naturalHeight) return false;
+    const width = Math.max(1, canvas.width);
+    const height = Math.max(1, canvas.height);
+    renderer.setSize(width, height, false);
+    camera.fov = Math.max(35, Math.min(100, panoramaState.fov));
+    camera.aspect = width / Math.max(1, height);
+    camera.updateProjectionMatrix();
+    const pitch = Math.max(-85, Math.min(85, panoramaState.pitch));
+    const phi = THREE.MathUtils.degToRad(90 - pitch);
+    const theta = THREE.MathUtils.degToRad(panoramaState.yaw);
+    const target = new THREE.Vector3(
+        500 * Math.sin(phi) * Math.cos(theta),
+        500 * Math.cos(phi),
+        500 * Math.sin(phi) * Math.sin(theta)
+    );
+    camera.position.set(0, 0, 0);
+    camera.lookAt(target);
+    renderer.render(scene, camera);
+    return true;
+}
+function renderPanoramaFrame(){
+    if(!drawPanoramaFrame()) return;
+    panoramaState.animationId = requestAnimationFrame(renderPanoramaFrame);
+}
+function startPanoramaLoop(){
+    if(panoramaState.animationId) cancelAnimationFrame(panoramaState.animationId);
+    panoramaState.animationId = requestAnimationFrame(renderPanoramaFrame);
+}
+function stopPanoramaLoop(){
+    if(panoramaState.animationId) cancelAnimationFrame(panoramaState.animationId);
+    panoramaState.animationId = 0;
+}
+function resizePanoramaViewer(){
+    const stage = document.getElementById('panoramaStage');
+    const frame = document.getElementById('previewFrame');
+    const canvas = document.getElementById('panoramaCanvas');
+    if(!stage) return;
+    const ratio = panoramaRatioValue();
+    const aspect = Math.max(0.08, Math.min(12, ratio.w / ratio.h));
+    const maxW = Math.max(260, Math.min(1180, window.innerWidth - 116));
+    const maxH = Math.max(220, Math.min(780, window.innerHeight - 220));
+    let w = maxW;
+    let h = w / aspect;
+    if(h > maxH){
+        h = maxH;
+        w = h * aspect;
+    }
+    w = Math.max(160, Math.round(w));
+    h = Math.max(160, Math.round(h));
+    stage.style.width = `${w}px`;
+    stage.style.height = `${h}px`;
+    stage.style.aspectRatio = `${ratio.w} / ${ratio.h}`;
+    if(frame){
+        frame.style.width = `${w}px`;
+        frame.style.height = `${h}px`;
+    }
+    if(canvas){
+        const render = panoramaResolutionValue();
+        const nextW = Math.max(1, Math.round(render.w));
+        const nextH = Math.max(1, Math.round(render.h));
+        if(canvas.width !== nextW) canvas.width = nextW;
+        if(canvas.height !== nextH) canvas.height = nextH;
+    }
+}
+function disposePanoramaTexture(){
+    if(panoramaState.texture){
+        panoramaState.texture.dispose?.();
+        panoramaState.texture = null;
+    }
+    if(panoramaState.sphere?.material){
+        panoramaState.sphere.material.map = null;
+        panoramaState.sphere.material.needsUpdate = true;
+    }
+    panoramaState.image = null;
+}
+async function loadPanoramaTexture(src, allowFallback=true){
+    if(!src) return;
+    const token = ++panoramaState.loadToken;
+    const stage = document.getElementById('panoramaStage');
+    stage?.classList.remove('ready');
+    let ready = false;
+    try {
+        ready = await ensurePanoramaRenderer();
+    } catch(e) {
+        console.warn('panorama renderer init failed', e);
+        ready = false;
+    }
+    if(!ready){
+        stage?.classList.add('ready');
+        toast(tr('smart.panoramaLoadFailed'));
+        return;
+    }
+    if(token !== panoramaState.loadToken) return;
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    const fallback = allowFallback ? panoramaFallbackSource() : '';
+    const done = () => {
+        if(token !== panoramaState.loadToken){
+            return;
+        }
+        disposePanoramaTexture();
+        if(!applyPanoramaTexture(img)){
+            stage?.classList.add('ready');
+            toast(tr('smart.panoramaLoadFailed'));
+            return;
+        }
+        panoramaState.image = img;
+        panoramaState.loadedSrc = src;
+        stage?.classList.add('ready');
+        resizePanoramaViewer();
+        startPanoramaLoop();
+    };
+    const fail = () => {
+        if(token !== panoramaState.loadToken) return;
+        if(fallback && fallback !== src){
+            loadPanoramaTexture(fallback, false);
+            return;
+        }
+        stage?.classList.add('ready');
+        toast(tr('smart.panoramaLoadFailed'));
+    };
+    img.onload = done;
+    img.onerror = fail;
+    img.src = src;
+    if(img.complete && img.naturalWidth) done();
+}
+function refreshPanoramaControls(){
+    const controls = document.getElementById('panoramaControls');
+    const custom = document.getElementById('panoramaCustomRatio');
+    if(controls) controls.style.display = panoramaState.enabled ? 'inline-flex' : 'none';
+    if(custom) custom.style.display = panoramaState.enabled && panoramaState.ratio === 'custom' ? 'inline-flex' : 'none';
+    document.querySelectorAll('[data-panorama-ratio]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.panoramaRatio === panoramaState.ratio);
+    });
+    const w = document.getElementById('panoramaRatioW');
+    const h = document.getElementById('panoramaRatioH');
+    if(w && document.activeElement !== w) w.value = panoramaState.customW;
+    if(h && document.activeElement !== h) h.value = panoramaState.customH;
+}
+function setPanoramaEnabled(enabled){
+    const next = Boolean(enabled);
+    if(panoramaState.enabled === next) return;
+    panoramaState.enabled = next;
+    const stage = document.getElementById('previewStage');
+    const pano = document.getElementById('panoramaStage');
+    const currentImg = document.getElementById('previewCurrentImage');
+    const compareLayer = document.getElementById('previewCompareLayer');
+    const compareHandle = document.getElementById('previewCompareHandle');
+    const toggle = document.getElementById('panoramaToggleBtn');
+    const exportBtn = document.getElementById('panoramaExportBtn');
+    const compareToggle = document.getElementById('compareToggleBtn');
+    const compareThumbs = document.getElementById('compareThumbs');
+    const previewTools = document.getElementById('imagePreviewTools');
+    stage?.classList.toggle('panorama-on', next);
+    previewTools?.classList.toggle('panorama-tools-on', next);
+    if(pano) pano.style.display = next ? 'block' : 'none';
+    if(currentImg) currentImg.style.display = next ? 'none' : 'block';
+    if(compareLayer && next) compareLayer.style.display = 'none';
+    if(compareHandle && next) compareHandle.style.display = 'none';
+    if(toggle) toggle.classList.toggle('active', next);
+    if(exportBtn) exportBtn.style.display = next ? 'inline-flex' : 'none';
+    if(compareToggle) compareToggle.style.display = next ? 'none' : 'inline-flex';
+    if(compareThumbs && next){ compareThumbs.style.display = 'none'; compareThumbs.innerHTML = ''; }
+    previewCompareOn = next ? false : previewCompareOn;
+    if(next){
+        previewPan = {x:0, y:0};
+        previewZoom = 1.0;
+        applyPreviewTransform();
+        resizePanoramaViewer();
+        loadPanoramaTexture(panoramaSource());
+        updatePreviewMetaHint(tr('smart.panoramaHint'));
+    } else {
+        stopPanoramaLoop();
+        const frame = document.getElementById('previewFrame');
+        if(frame){ frame.style.width = ''; frame.style.height = ''; }
+        refreshComparePanel();
+    }
+    refreshPanoramaControls();
+    updateZoomLabel();
+}
+function togglePanoramaPreview(){
+    const image = currentEditImage().image || {};
+    if(mediaKindForItem(image) !== 'image') return;
+    setPanoramaEnabled(!panoramaState.enabled);
+}
+async function exportPanoramaFrame(){
+    if(!panoramaState.enabled) return;
+    const canvasEl = document.getElementById('panoramaCanvas');
+    if(!canvasEl){ toast(tr('smart.panoramaExportFailed')); return; }
+    try {
+        if(!drawPanoramaFrame()) throw new Error(tr('smart.panoramaExportFailed'));
+        const blob = await new Promise(resolve => canvasEl.toBlob(resolve, 'image/png'));
+        if(!blob) throw new Error(tr('smart.panoramaExportFailed'));
+        const editing = currentEditImage();
+        const rawName = editing.image?.name || fileNameFromUrl(editing.image?.url || '') || 'panorama';
+        const base = String(rawName).replace(/\.[a-z0-9]{2,8}$/i, '') || 'panorama';
+        const filename = safeExportFileName(`${base}-panorama.png`, 'panorama.png');
+        const uploaded = await uploadFiles([new File([blob], filename, {type:'image/png'})]);
+        const frame = uploaded[0];
+        if(!frame?.url) throw new Error(tr('smart.panoramaExportFailed'));
+        frame.kind = 'image';
+        frame.natural_w = canvasEl.width;
+        frame.natural_h = canvasEl.height;
+        const rect = editing.node ? nodeRect(editing.node) : null;
+        const point = rect
+            ? {x:rect.x + rect.width + 240, y:rect.y + rect.height / 2}
+            : viewportCenter();
+        pushUndo();
+        const newNode = createImageNodeAt(point, [frame], {select:true, skipUndo:true});
+        selectedIds = [];
+        selectedImage = {nodeId:newNode.id, index:0};
+        render();
+        scheduleSave();
+        toast(tr('smart.panoramaExportDone'));
+    } catch(e) {
+        toast((e.message || tr('smart.panoramaExportFailed')).slice(0, 120));
+    }
+}
+function resetPanoramaView(){
+    panoramaState.fov = 75;
+    panoramaState.yaw = 0;
+    panoramaState.pitch = 0;
+    resizePanoramaViewer();
+    updateZoomLabel();
+}
+function disposePanoramaPreview(){
+    stopPanoramaLoop();
+    disposePanoramaTexture();
+    panoramaState.enabled = false;
+    panoramaState.drag = null;
+    panoramaState.loadedSrc = '';
+    panoramaState.loadToken++;
+    const stage = document.getElementById('panoramaStage');
+    stage?.classList.remove('ready');
+    if(stage) stage.style.display = 'none';
+    document.getElementById('previewStage')?.classList.remove('panorama-on', 'panning');
+    document.getElementById('imagePreviewTools')?.classList.remove('panorama-tools-on');
+    document.getElementById('panoramaControls')?.style.setProperty('display', 'none');
+    document.getElementById('panoramaToggleBtn')?.classList.remove('active');
+    document.getElementById('panoramaExportBtn')?.style.setProperty('display', 'none');
+}
+function applyPanoramaRatio(value){
+    panoramaState.ratio = PANORAMA_RATIO_PRESETS[value] ? value : 'custom';
+    refreshPanoramaControls();
+    resizePanoramaViewer();
 }
 function setPreviewComparePos(clientX){
     const frame = document.getElementById('previewFrame');
@@ -4555,11 +6611,17 @@ function setPreviewComparePos(clientX){
 }
 function syncPreviewFrameSize(){
     const frame = document.getElementById('previewFrame');
+    if(panoramaState.enabled){
+        resizePanoramaViewer();
+        return;
+    }
     const currentImg = document.getElementById('previewCurrentImage');
+    const currentVideo = document.getElementById('previewCurrentVideo');
     const compareImg = document.getElementById('previewCompareImage');
-    if(!frame || !currentImg) return;
-    const w = currentImg.clientWidth || currentImg.naturalWidth || 1;
-    const h = currentImg.clientHeight || currentImg.naturalHeight || 1;
+    const currentMedia = currentVideo && currentVideo.style.display !== 'none' ? currentVideo : currentImg;
+    if(!frame || !currentMedia) return;
+    const w = currentMedia.clientWidth || currentMedia.videoWidth || currentMedia.naturalWidth || 1;
+    const h = currentMedia.clientHeight || currentMedia.videoHeight || currentMedia.naturalHeight || 1;
     frame.style.width = `${w}px`;
     frame.style.height = `${h}px`;
     if(compareImg){
@@ -4571,9 +6633,10 @@ function previewResolutionText(){
     const editing = currentEditImage();
     const image = editing.image || {};
     const currentImg = document.getElementById('previewCurrentImage');
+    const currentVideo = document.getElementById('previewCurrentVideo');
     const cropImg = document.getElementById('cropImage');
-    const w = Number(image.natural_w || image.width || image.w || 0) || Number(currentImg?.naturalWidth || 0) || Number(cropImg?.naturalWidth || 0);
-    const h = Number(image.natural_h || image.height || image.h || 0) || Number(currentImg?.naturalHeight || 0) || Number(cropImg?.naturalHeight || 0);
+    const w = Number(image.natural_w || image.width || image.w || 0) || Number(currentVideo?.videoWidth || 0) || Number(currentImg?.naturalWidth || 0) || Number(cropImg?.naturalWidth || 0);
+    const h = Number(image.natural_h || image.height || image.h || 0) || Number(currentVideo?.videoHeight || 0) || Number(currentImg?.naturalHeight || 0) || Number(cropImg?.naturalHeight || 0);
     if(!w || !h) return '';
     return `${tr('smart.resolution')}: ${Math.round(w)} x ${Math.round(h)}`;
 }
@@ -4588,9 +6651,10 @@ function rememberPreviewImageResolution(){
     const image = editing.image;
     if(!image) return;
     const currentImg = document.getElementById('previewCurrentImage');
+    const currentVideo = document.getElementById('previewCurrentVideo');
     const cropImg = document.getElementById('cropImage');
-    const w = Number(currentImg?.naturalWidth || 0) || Number(cropImg?.naturalWidth || 0);
-    const h = Number(currentImg?.naturalHeight || 0) || Number(cropImg?.naturalHeight || 0);
+    const w = Number(currentVideo?.videoWidth || 0) || Number(currentImg?.naturalWidth || 0) || Number(cropImg?.naturalWidth || 0);
+    const h = Number(currentVideo?.videoHeight || 0) || Number(currentImg?.naturalHeight || 0) || Number(cropImg?.naturalHeight || 0);
     if(w > 0 && h > 0 && (!image.natural_w || !image.natural_h)){
         image.natural_w = w;
         image.natural_h = h;
@@ -4606,7 +6670,7 @@ function previewCompareSources(){
     const dedup = [];
     const seen = new Set();
     for(const img of upstream){
-        if(!img?.url || seen.has(img.url)) continue;
+        if(!img?.url || seen.has(img.url) || mediaKindForItem(img) !== 'image') continue;
         seen.add(img.url);
         dedup.push(img);
     }
@@ -4616,7 +6680,7 @@ function previewCompareSources(){
         const src = nodes.find(n => n.id === sourceId);
         if(src && (src.images || []).length){
             for(const img of src.images){
-                if(!img?.url || seen.has(img.url)) continue;
+                if(!img?.url || seen.has(img.url) || mediaKindForItem(img) !== 'image') continue;
                 seen.add(img.url);
                 dedup.push(img);
             }
@@ -4628,19 +6692,90 @@ function refreshComparePanel(){
     const stage = document.getElementById('previewStage');
     const compareImg = document.getElementById('previewCompareImage');
     const currentImg = document.getElementById('previewCurrentImage');
+    const currentVideo = document.getElementById('previewCurrentVideo');
     const compareLayer = document.getElementById('previewCompareLayer');
     const compareHandle = document.getElementById('previewCompareHandle');
     const thumbsEl = document.getElementById('compareThumbs');
     const toggle = document.getElementById('compareToggleBtn');
+    const panoramaToggle = document.getElementById('panoramaToggleBtn');
     const editing = currentEditImage();
     const curUrl = editing.image?.url || '';
+    const isVideoPreview = mediaKindForItem(editing.image || {}) === 'video';
+    if(panoramaToggle){
+        panoramaToggle.style.display = isVideoPreview ? 'none' : 'inline-flex';
+        panoramaToggle.classList.toggle('active', panoramaState.enabled);
+    }
+    if(panoramaState.enabled && !isVideoPreview){
+        currentImg.onload = null;
+        currentImg.onerror = null;
+        currentImg.style.display = 'none';
+        stage?.classList.remove('compare-on');
+        if(compareLayer) compareLayer.style.display = 'none';
+        if(compareHandle) compareHandle.style.display = 'none';
+        if(thumbsEl){ thumbsEl.style.display = 'none'; thumbsEl.innerHTML = ''; }
+        if(toggle) toggle.classList.remove('active');
+        updatePreviewMetaHint(tr('smart.panoramaHint'));
+        return;
+    }
     const onCurrentLoaded = () => {
         rememberPreviewImageResolution();
         syncPreviewFrameSize();
         updatePreviewMetaHint();
     };
+    if(isVideoPreview){
+        currentImg.onload = null;
+        currentImg.onerror = null;
+        currentImg.removeAttribute('src');
+        currentImg.style.display = 'none';
+        if(currentVideo){
+            const previewSrc = displayMediaUrl(editing.image || curUrl);
+            currentVideo.style.display = 'block';
+            currentVideo.onloadedmetadata = onCurrentLoaded;
+            currentVideo.onloadeddata = onCurrentLoaded;
+            if(currentVideo.getAttribute('src') !== previewSrc){
+                currentVideo.src = previewSrc;
+                currentVideo.load?.();
+            }
+            if(currentVideo.readyState >= 1) requestAnimationFrame(onCurrentLoaded);
+        }
+        previewCompareOn = false;
+        previewCompareIndex = -1;
+        stage.classList.remove('compare-on');
+        if(compareLayer) compareLayer.style.display = 'none';
+        if(compareHandle) compareHandle.style.display = 'none';
+        if(thumbsEl){ thumbsEl.style.display = 'none'; thumbsEl.innerHTML = ''; }
+        if(toggle){
+            toggle.disabled = true;
+            toggle.style.opacity = '.45';
+            toggle.classList.remove('active');
+            toggle.title = tr('smart.compareEmpty');
+        }
+        if(panoramaToggle) panoramaToggle.style.display = 'none';
+        updatePreviewMetaHint(editing.node?.runPrompt ? `${tr('smart.runPromptPrefix')}${editing.node.runPrompt.slice(0, 60)}` : '');
+        return;
+    }
+    if(currentVideo){
+        currentVideo.pause?.();
+        currentVideo.onloadedmetadata = null;
+        currentVideo.onloadeddata = null;
+        currentVideo.removeAttribute('src');
+        currentVideo.load?.();
+        currentVideo.style.display = 'none';
+    }
+    currentImg.style.display = 'block';
     currentImg.onload = onCurrentLoaded;
-    if(currentImg.getAttribute('src') !== curUrl) currentImg.src = curUrl;
+    currentImg.onerror = () => {
+        if(currentImg.dataset.proxyFallbackTried === '1') return;
+        const fallback = proxiedMediaUrl(editing.image || curUrl);
+        if(!fallback || fallback === currentImg.getAttribute('src')) return;
+        currentImg.dataset.proxyFallbackTried = '1';
+        currentImg.src = fallback;
+    };
+    const previewSrc = displayMediaUrl(editing.image || curUrl);
+    if(currentImg.getAttribute('src') !== previewSrc) {
+        currentImg.dataset.proxyFallbackTried = '';
+        currentImg.src = previewSrc;
+    }
     if(currentImg.complete && currentImg.naturalWidth) requestAnimationFrame(onCurrentLoaded);
     const sources = previewCompareSources();
     const hasSource = sources.length > 0;
@@ -4701,14 +6836,113 @@ function togglePreviewCompare(){
     if(!previewCompareOn) previewCompareIndex = -1;
     refreshComparePanel();
 }
+function currentPreviewVideo(){
+    if(!imageEditModal.classList.contains('open')) return null;
+    if(mediaKindForItem(currentEditImage().image || {}) !== 'video') return null;
+    return document.getElementById('previewCurrentVideo');
+}
+function videoFrameStep(){
+    const image = currentEditImage().image || {};
+    const fps = Number(image.fps || image.frameRate || image.frame_rate || image.framespersecond || image.frames_per_second || 0);
+    return 1 / Math.max(1, Math.min(120, Number.isFinite(fps) && fps > 0 ? fps : 30));
+}
+function seekPreviewVideoFrames(direction){
+    const video = currentPreviewVideo();
+    if(!video || video.readyState < 1) return false;
+    video.pause?.();
+    const step = videoFrameStep();
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    const maxTime = duration ? Math.max(0, duration - step / 2) : Number.MAX_SAFE_INTEGER;
+    video.currentTime = Math.max(0, Math.min(maxTime, Number(video.currentTime || 0) + direction * step));
+    return true;
+}
+function waitForVideoEvent(video, eventName, timeout=1500){
+    return new Promise(resolve => {
+        let done = false;
+        const finish = () => {
+            if(done) return;
+            done = true;
+            clearTimeout(timer);
+            video.removeEventListener(eventName, finish);
+            resolve();
+        };
+        const timer = setTimeout(finish, timeout);
+        video.addEventListener(eventName, finish, {once:true});
+    });
+}
+async function seekVideoForFrame(video, time){
+    if(Math.abs(Number(video.currentTime || 0) - time) <= 0.002) return;
+    video.currentTime = time;
+    await waitForVideoEvent(video, 'seeked', 2200);
+}
+async function exportVideoFrame(which='current'){
+    const video = currentPreviewVideo();
+    if(!video){ toast('没有可导出的视频帧'); return; }
+    if(video.readyState < 2) await waitForVideoEvent(video, 'loadeddata', 2200);
+    if(!video.videoWidth || !video.videoHeight){ toast('视频还没有加载完成'); return; }
+    const originalTime = Number(video.currentTime || 0);
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+    const step = videoFrameStep();
+    const target = which === 'first'
+        ? 0
+        : which === 'last'
+            ? Math.max(0, duration - step / 2)
+            : originalTime;
+    const suffix = which === 'first' ? 'first-frame' : which === 'last' ? 'last-frame' : 'current-frame';
+    try {
+        video.pause?.();
+        await seekVideoForFrame(video, target);
+        const canvasEl = document.createElement('canvas');
+        canvasEl.width = video.videoWidth;
+        canvasEl.height = video.videoHeight;
+        const ctx = canvasEl.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvasEl.width, canvasEl.height);
+        const blob = await new Promise(resolve => canvasEl.toBlob(resolve, 'image/png'));
+        if(!blob) throw new Error('导出帧失败');
+        const editing = currentEditImage();
+        const rawName = editing.image?.name || fileNameFromUrl(editing.image?.url || '') || 'video';
+        const base = String(rawName).replace(/\.[a-z0-9]{2,8}$/i, '') || 'video';
+        const filename = safeExportFileName(`${base}-${suffix}.png`, `${suffix}.png`);
+        const uploaded = await uploadFiles([new File([blob], filename, {type:'image/png'})]);
+        const frame = uploaded[0];
+        if(!frame?.url) throw new Error('导出到画布失败');
+        frame.kind = 'image';
+        frame.natural_w = video.videoWidth;
+        frame.natural_h = video.videoHeight;
+        const rect = editing.node ? nodeRect(editing.node) : null;
+        const point = rect
+            ? {x:rect.x + rect.width + 240, y:rect.y + rect.height / 2}
+            : viewportCenter();
+        pushUndo();
+        const newNode = createImageNodeAt(point, [frame], {select:true, skipUndo:true});
+        selectedIds = [];
+        selectedImage = {nodeId:newNode.id, index:0};
+        render();
+        scheduleSave();
+        toast('已导出到画布');
+        if(which !== 'current') await seekVideoForFrame(video, originalTime);
+    } catch(e) {
+        toast((e.message || '导出帧失败').slice(0, 120));
+    }
+}
 function editDrawSnapshot(){
     const canvasEl = editDrawCanvas();
-    return {imageData:canvasEl.getContext('2d').getImageData(0, 0, canvasEl.width, canvasEl.height), labelCounter:brushLabelCounter};
+    return {
+        imageData:canvasEl.getContext('2d').getImageData(0, 0, canvasEl.width, canvasEl.height),
+        labelCounter:brushLabelCounter,
+        textItems:editTextItems.map(item => ({...item})),
+        textSelectedId:editTextSelectedId || ''
+    };
 }
 function restoreEditDrawSnapshot(snapshot){
     if(!snapshot) return;
+    removeEditTextInlineEditor(false);
     editDrawCanvas().getContext('2d').putImageData(snapshot.imageData || snapshot, 0, 0);
     if(snapshot.labelCounter) brushLabelCounter = snapshot.labelCounter;
+    editTextItems = (snapshot.textItems || []).map(item => ({...item}));
+    editTextSelectedId = snapshot.textSelectedId || '';
+    renderEditTextCanvas();
+    syncTextToolState(true);
 }
 function pushEditDrawHistory(){
     editDrawUndoStack.push(editDrawSnapshot());
@@ -4733,27 +6967,45 @@ function redoEditDrawing(){
     syncEditDrawingHistoryButtons();
 }
 function editCanvasHasPixels(){
+    if(editTextHasContent()) return true;
     const canvasEl = editDrawCanvas();
     const data = canvasEl.getContext('2d').getImageData(0, 0, canvasEl.width, canvasEl.height).data;
     for(let i = 3; i < data.length; i += 4) if(data[i] > 0) return true;
     return false;
 }
 function clearEditDrawing(silent=false){
+    removeEditTextInlineEditor(false);
     const canvasEl = editDrawCanvas();
     if(!silent && editCanvasHasPixels()) pushEditDrawHistory();
     canvasEl.getContext('2d').clearRect(0, 0, canvasEl.width, canvasEl.height);
+    const textCanvasEl = editTextCanvas();
+    textCanvasEl?.getContext('2d')?.clearRect(0, 0, textCanvasEl.width, textCanvasEl.height);
+    editTextItems = [];
+    editTextSelectedId = '';
+    editTextDrag = null;
+    editTextDirty = false;
     brushLabelCounter = 1;
+    syncTextToolState(true);
     syncEditDrawingHistoryButtons();
 }
 function resetEditDrawingHistory(){
+    removeEditTextInlineEditor(false);
     editDrawUndoStack = [];
     editDrawRedoStack = [];
     brushLabelCounter = 1;
+    editTextItems = [];
+    editTextSelectedId = '';
+    editTextDrag = null;
+    editTextDirty = false;
+    renderEditTextCanvas();
+    syncTextToolState(true);
     syncEditDrawingHistoryButtons();
 }
 function setBrushTool(tool){
-    brushTool = ['free','rect','ellipse','label'].includes(tool) ? tool : 'free';
+    if(tool !== 'text') removeEditTextInlineEditor(true);
+    brushTool = ['free','rect','ellipse','label','text'].includes(tool) ? tool : 'free';
     syncBrushToolButtons();
+    syncTextToolState(true);
 }
 function syncBrushToolButtons(){
     document.querySelectorAll('[data-brush-tool]').forEach(btn => {
@@ -4761,6 +7013,7 @@ function syncBrushToolButtons(){
         btn.classList.toggle('primary', active);
         btn.classList.toggle('secondary', !active);
     });
+    document.getElementById('cropCanvas')?.classList.toggle('text-mode', imageEditMode === 'brush' && brushTool === 'text');
 }
 function editDrawPoint(event){
     const canvasEl = editDrawCanvas();
@@ -5022,6 +7275,10 @@ function syncImageEditOverflow(){
 }
 function resetImageEditZoom(){
     if(imageEditMode === 'preview'){
+        if(panoramaState.enabled){
+            resetPanoramaView();
+            return;
+        }
         resetPreviewTransform();
         return;
     }
@@ -5031,7 +7288,12 @@ function resetImageEditZoom(){
 }
 function updateZoomLabel(){
     const el = document.getElementById('imageEditZoomLabel');
-    if(el) el.textContent = Math.round((imageEditMode === 'preview' ? previewZoom : imageEditZoom) * 100) + '%';
+    if(!el) return;
+    if(imageEditMode === 'preview' && panoramaState.enabled){
+        el.textContent = Math.round((75 / Math.max(1, panoramaState.fov)) * 100) + '%';
+        return;
+    }
+    el.textContent = Math.round((imageEditMode === 'preview' ? previewZoom : imageEditZoom) * 100) + '%';
 }
 function syncGridCustomCursor(){
     const el = document.getElementById('cropCanvas');
@@ -5067,6 +7329,7 @@ function renderCropBox(){
     const cropCanvasEl = document.getElementById('cropCanvas');
     const img = document.getElementById('cropImage');
     const draw = editDrawCanvas();
+    const textCanvas = editTextCanvas();
     let boxX = cropState.x;
     let boxY = cropState.y;
     if(imageEditMode === 'outpaint' && cropCanvasEl && img){
@@ -5081,6 +7344,10 @@ function renderCropBox(){
             draw.style.left = img.style.left;
             draw.style.top = img.style.top;
         }
+        if(textCanvas){
+            textCanvas.style.left = img.style.left;
+            textCanvas.style.top = img.style.top;
+        }
         updateOutpaintResolutionLabel();
     } else if(cropCanvasEl && img){
         cropCanvasEl.style.width = '';
@@ -5091,6 +7358,10 @@ function renderCropBox(){
         if(draw){
             draw.style.left = '';
             draw.style.top = '';
+        }
+        if(textCanvas){
+            textCanvas.style.left = '';
+            textCanvas.style.top = '';
         }
     }
     const box = document.getElementById('cropBox');
@@ -5169,9 +7440,13 @@ function navigatePreviewImage(delta){
     const next = (Number(previewNavState.index || 0) + Number(delta || 0) + count) % count;
     openImageEditor(node.id, next);
 }
+function openImagePreview(nodeId, imageIndex=0){
+    openImageEditor(nodeId, imageIndex);
+    setImageEditMode('preview');
+}
 function openImageEditor(nodeId, imageIndex=0){
     const node = nodes.find(n => n.id === nodeId);
-    const image = node?.images?.[imageIndex];
+    const image = imageForDisplay(node?.images?.[imageIndex]);
     if(!image?.url) return;
     const kind = mediaKindForItem(image);
     if(kind !== 'image' && kind !== 'video'){
@@ -5184,6 +7459,7 @@ function openImageEditor(nodeId, imageIndex=0){
     cropState = {nodeId, imageIndex, x:0, y:0, w:0, h:0};
     gridCustomMode = false; gridCustomLines = []; gridCustomHistory = []; gridCustomDrag = null; gridCustomOrientation = 'h';
     imageEditZoom = 1.0; imageEditBaseW = 0; imageEditBaseH = 0; imageEditModeTouched = false;
+    editTextItems = []; editTextSelectedId = ''; editTextDrag = null; editTextDirty = false;
     const toggle = document.getElementById('gridCustomToggle');
     if(toggle){ toggle.classList.add('secondary'); toggle.classList.remove('primary'); }
     syncGridCustomControls();
@@ -5197,7 +7473,18 @@ function openImageEditor(nodeId, imageIndex=0){
     imageEditModal.classList.add('open');
     previewCompareOn = false;
     previewCompareIndex = -1;
+    disposePanoramaPreview();
     resetPreviewTransform();
+    if(kind === 'video'){
+        img.onload = null;
+        img.onerror = null;
+        img.removeAttribute('src');
+        delete img.dataset.proxyFallbackTried;
+        setImageEditMode('preview');
+        updatePreviewNavButtons();
+        refreshIcons();
+        return;
+    }
     img.onload = () => {
         const targetImage = node.images?.[imageIndex];
         if(targetImage && img.naturalWidth && img.naturalHeight && (!targetImage.natural_w || !targetImage.natural_h)){
@@ -5209,29 +7496,50 @@ function openImageEditor(nodeId, imageIndex=0){
         updateZoomLabel(); resizeEditDrawCanvas(); resetEditDrawingHistory(); clearEditDrawing(true); resetCropBox();
         if(!imageEditModeTouched) setImageEditMode('preview');
         else refreshComparePanel();
-        updatePreviewMetaHint();
+        if(!panoramaState.enabled) updatePreviewMetaHint();
         syncImageEditOverflow(); refreshIcons();
     };
+    img.onerror = () => {
+        if(img.dataset.proxyFallbackTried === '1') return;
+        const fallback = proxiedMediaUrl(image);
+        if(!fallback || fallback === img.getAttribute('src')) return;
+        img.dataset.proxyFallbackTried = '1';
+        img.src = fallback;
+    };
+    img.dataset.proxyFallbackTried = '';
     img.crossOrigin = 'anonymous';
-    img.src = image.url;
+    img.src = displayMediaUrl(image);
     setImageEditMode('preview');
     updatePreviewNavButtons();
     refreshIcons();
 }
 function closeImageEditor(){
     imageEditModal.classList.remove('open');
+    document.querySelector('.image-edit-panel')?.classList.remove('video-preview-mode');
     const img = document.getElementById('cropImage');
-    img.onload = null; img.removeAttribute('src'); img.style.width = ''; img.style.height = ''; img.style.maxWidth = ''; img.style.maxHeight = '';
+    const previewVideo = document.getElementById('previewCurrentVideo');
+    img.onload = null; img.onerror = null; img.removeAttribute('src'); delete img.dataset.proxyFallbackTried; img.style.width = ''; img.style.height = ''; img.style.maxWidth = ''; img.style.maxHeight = '';
     img.style.position = ''; img.style.left = ''; img.style.top = '';
+    if(previewVideo){
+        previewVideo.pause?.();
+        previewVideo.onloadedmetadata = null;
+        previewVideo.onloadeddata = null;
+        previewVideo.removeAttribute('src');
+        previewVideo.load?.();
+        previewVideo.style.display = 'none';
+    }
     clearEditDrawing(true);
     cropState = null; cropDrag = null; editDrawState = null; resetEditDrawingHistory(); gridCustomDrag = null;
     previewNavState = {nodeId:'', index:0, count:0};
     imageEditZoom = 1.0; imageEditBaseW = 0; imageEditBaseH = 0; imageEditModeTouched = false;
+    disposePanoramaPreview();
     previewPanDrag = null; previewCompareDrag = false; imageEditPanDrag = null; resetPreviewTransform();
     document.getElementById('imageEditStage')?.classList.remove('overflow-x', 'overflow-y', 'preview-mode');
     const cropCanvasEl = document.getElementById('cropCanvas');
-    cropCanvasEl?.classList.remove('grid-custom-h', 'grid-custom-v', 'outpaint-mode', 'outpaint-warning', 'dragging-image');
+    cropCanvasEl?.classList.remove('grid-custom-h', 'grid-custom-v', 'outpaint-mode', 'outpaint-warning', 'dragging-image', 'text-mode');
     if(cropCanvasEl){ cropCanvasEl.style.width = ''; cropCanvasEl.style.height = ''; }
+    const textCanvas = editTextCanvas();
+    if(textCanvas){ textCanvas.style.left = ''; textCanvas.style.top = ''; }
     updatePreviewNavButtons();
 }
 function clampCrop(){
@@ -5292,11 +7600,7 @@ function applyOutpaintSizeToSmartParams(width, height){
     const subject = currentEditImage().node;
     if(!subject || !isSmartImageNode(subject)) return;
     subject.outpaintSize = {width:w, height:h};
-    subject.runSettings = withOutpaintDisplaySettings(subject, {
-        ...cloneSmartSettings(subject.runSettings || settings),
-        engine:'api',
-        apiKind:'image'
-    });
+    subject.runSettings = withOutpaintDisplaySettings(subject, cloneSmartSettings(subject.runSettings || settings));
     if(activeSettingsSubject()?.id === subject.id){
         settings = smartSettingsForNode(subject);
         renderDynamicParams();
@@ -5381,14 +7685,16 @@ function maskCanvasFromDrawCanvas(src){
     return mask;
 }
 async function applyImageBrush(){
-    if(!cropState || !editCanvasHasPixels()) return;
+    if(!cropState) return;
+    removeEditTextInlineEditor(true);
+    if(!editCanvasHasPixels()) return;
     const {node, image} = currentEditImage();
     const img = document.getElementById('cropImage');
     if(!node || !image || !img.naturalWidth || !img.naturalHeight) return;
     const canvasEl = document.createElement('canvas');
     canvasEl.width = img.naturalWidth; canvasEl.height = img.naturalHeight;
     const ctx = canvasEl.getContext('2d');
-    ctx.drawImage(img, 0, 0, canvasEl.width, canvasEl.height); ctx.drawImage(editDrawCanvas(), 0, 0);
+    ctx.drawImage(img, 0, 0, canvasEl.width, canvasEl.height); ctx.drawImage(editDrawCanvas(), 0, 0); ctx.drawImage(editTextCanvas(), 0, 0);
     const blob = await new Promise(resolve => canvasEl.toBlob(resolve, 'image/png'));
     const base = (image.name || 'image').replace(/\.[^.]+$/, '');
     const file = blob ? await uploadCroppedBlob(blob, `${base}_paint.png`) : null;
@@ -5399,16 +7705,19 @@ async function applyImageGridSplit(){
     const {node, image} = currentEditImage();
     const img = document.getElementById('cropImage');
     if(!node || !image || !img.naturalWidth || !img.naturalHeight) return;
-    const rects = gridSplitRects(img.naturalWidth, img.naturalHeight);
+    const rects = gridSplitRects(img.naturalWidth, img.naturalHeight).sort((a, b) => (Number(a.row || 0) - Number(b.row || 0)) || (Number(a.col || 0) - Number(b.col || 0)));
     if(!rects.length) return;
-    const base = (image.name || 'image').replace(/\.[^.]+$/, '');
+    const base = safeExportFileName((downloadNameForMediaItem(image, 'image') || 'image').replace(/\.[^.]+$/, ''), 'image');
+    const digits = String(rects.length).length;
     const blobs = [];
-    for(const rect of rects){
+    for(let i = 0; i < rects.length; i++){
+        const rect = rects[i];
         const canvasEl = document.createElement('canvas');
         canvasEl.width = rect.w; canvasEl.height = rect.h;
         canvasEl.getContext('2d').drawImage(img, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
         const blob = await new Promise(resolve => canvasEl.toBlob(resolve, 'image/png'));
-        if(blob) blobs.push({blob, name:`${base}_r${rect.row + 1}_c${rect.col + 1}.png`});
+        const order = String(i + 1).padStart(digits, '0');
+        if(blob) blobs.push({blob, name:`${base}_${order}_r${rect.row + 1}_c${rect.col + 1}.png`});
     }
     const files = await uploadImageBlobs(blobs);
     if(files.length){
@@ -5533,10 +7842,11 @@ function renderInputPromptPreview(node){
 }
 function renderInputThumbsRow(node){
     if(!inputThumbsRow) return;
+    syncJimengModelPillForRefs();
+    syncJimengVideoModelPillForRefs();
     const dedup = node ? visibleReferenceImagesFor(node) : [];
-    const showCloudUpload = settings.engine === 'api' && settings.apiKind === 'video';
-    inputThumbsRow.classList.toggle('has-items', dedup.length > 0 || showCloudUpload);
-    if(!dedup.length && !showCloudUpload){ inputThumbsRow.innerHTML = ''; return; }
+    inputThumbsRow.classList.toggle('has-items', dedup.length > 0);
+    if(!dedup.length){ inputThumbsRow.innerHTML = ''; return; }
     const thumbsHtml = dedup.map((img, i) => {
         const isVid = isVideoMediaItem(img);
         const isSelf = node ? isSelfReferenceForNode(node, img) : false;
@@ -5545,20 +7855,76 @@ function renderInputThumbsRow(node){
             : (smartImageMode(node) === 'workflow' ? tr('smart.inputUpstreamWorkflow') : tr('smart.inputUpstream'));
         const inner = isVid ? `<video src="${escapeHtml(img.url)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video>` : `<img src="${escapeHtml(img.url)}" draggable="false">`;
         const label = `图${i + 1}`;
-        return `<div class="input-thumb ${isSelf ? 'input-self' : ''}" draggable="false" data-thumb-index="${i}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${img.imageIndex ?? ''}" data-url="${escapeHtml(img.url || '')}" title="${escapeHtml(`${img.name || tr('smart.inputNum').replace('{n}', String(i + 1))} · ${title}`)}">${inner}<span class="input-thumb-label">${escapeHtml(label)}</span></div>`;
+        const sourceUrl = img.originalLocalUrl || img.url || '';
+        return `<div class="input-thumb ${isSelf ? 'input-self' : ''}" draggable="false" data-thumb-index="${i}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${img.imageIndex ?? ''}" data-url="${escapeHtml(img.url || '')}" data-source-url="${escapeHtml(sourceUrl)}" title="${escapeHtml(`${img.name || tr('smart.inputNum').replace('{n}', String(i + 1))} · ${title}`)}">${inner}<span class="input-thumb-label">${escapeHtml(label)}</span></div>`;
     }).join('');
-    inputThumbsRow.innerHTML = `<div class="input-thumb-list">${thumbsHtml}${dedup.length > 1 ? `<span class="input-thumb-count">${escapeHtml(tr('smart.inputCount').replace('{n}', String(dedup.length)))}</span>` : ''}</div>${showCloudUpload ? `<div class="input-thumb-actions">${renderManualVideoUrlControl()}${renderTempShUploadControl()}</div>` : ''}`;
+    inputThumbsRow.innerHTML = `<div class="input-thumb-list">${thumbsHtml}${dedup.length > 1 ? `<span class="input-thumb-count">${escapeHtml(tr('smart.inputCount').replace('{n}', String(dedup.length)))}</span>` : ''}</div>`;
     bindInputThumbsDrag(node, dedup);
-    bindInputThumbVideoActions();
 }
 function bindInputThumbsDrag(node, items){
     if(!inputThumbsRow) return;
+    let thumbDragIndex = -1;
     inputThumbsRow.querySelectorAll('.input-thumb').forEach(el => {
+        const index = Number(el.dataset.thumbIndex || -1);
+        const canReorder = items.length > 1 && Boolean(items[index]?.nodeId);
+        el.draggable = canReorder;
         el.addEventListener('click', e => {
             e.preventDefault();
             e.stopPropagation();
         });
+        if(!canReorder) return;
+        el.addEventListener('dragstart', e => {
+            e.stopPropagation();
+            thumbDragIndex = index;
+            el.classList.add('dragging');
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('application/x-smart-input-thumb', String(index));
+        });
+        el.addEventListener('dragend', e => {
+            e.stopPropagation();
+            thumbDragIndex = -1;
+            clearInputThumbDropMarkers();
+            el.classList.remove('dragging');
+        });
+        el.addEventListener('dragover', e => {
+            const rawFrom = e.dataTransfer.getData('application/x-smart-input-thumb');
+            const from = rawFrom === '' ? thumbDragIndex : Number(rawFrom);
+            if(!Number.isFinite(from) || from < 0 || from === index || !items[index]?.nodeId) return;
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = 'move';
+            clearInputThumbDropMarkers();
+            const placement = inputThumbDropPlacement(el, e);
+            el.dataset.dropPlacement = placement;
+            el.classList.add(placement === 'before' ? 'drop-before' : 'drop-after');
+        });
+        el.addEventListener('dragleave', e => {
+            if(el.contains(e.relatedTarget)) return;
+            delete el.dataset.dropPlacement;
+            el.classList.remove('drop-before', 'drop-after');
+        });
+        el.addEventListener('drop', e => {
+            const rawFrom = e.dataTransfer.getData('application/x-smart-input-thumb');
+            const from = rawFrom === '' ? thumbDragIndex : Number(rawFrom);
+            if(!Number.isFinite(from) || from < 0 || from === index || !items[index]?.nodeId) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const placement = inputThumbDropPlacement(el, e);
+            clearInputThumbDropMarkers();
+            reorderInputThumb(node, items, from, index, placement);
+        });
     });
+}
+function inputThumbDropPlacement(el, event){
+    const rect = el.getBoundingClientRect();
+    return event.clientX < rect.left + rect.width / 2 ? 'before' : 'after';
+}
+function clearInputThumbDropMarkers(){
+    inputThumbsRow?.querySelectorAll('.input-thumb.drop-before,.input-thumb.drop-after,.input-thumb.dragging')
+        .forEach(el => {
+            delete el.dataset.dropPlacement;
+            el.classList.remove('drop-before', 'drop-after', 'dragging');
+        });
 }
 function bindInputThumbVideoActions(){
     inputThumbsRow?.querySelectorAll('[data-manual-video-url]').forEach(btn => {
@@ -5584,10 +7950,59 @@ function bindInputThumbVideoActions(){
         };
     });
 }
-function reorderInputThumb(currentNode, items, from, to){
+function movedBeforeAfterIds(ids, movedId, targetId, placement='before'){
+    const list = (ids || []).filter(Boolean);
+    const from = list.indexOf(movedId);
+    const target = list.indexOf(targetId);
+    if(from < 0 || target < 0 || movedId === targetId) return list;
+    const [moved] = list.splice(from, 1);
+    let insertAt = list.indexOf(targetId);
+    if(insertAt < 0) return ids || [];
+    if(placement === 'after') insertAt += 1;
+    list.splice(insertAt, 0, moved);
+    return list;
+}
+function sameOrderedIds(a, b){
+    if((a || []).length !== (b || []).length) return false;
+    return (a || []).every((id, index) => id === b[index]);
+}
+function reorderInputSourceNodes(currentNode, movedId, targetId, placement='before'){
+    if(!currentNode || !movedId || !targetId || movedId === targetId) return false;
+    const sourceNodes = smartImageUsesWorkflowInput(currentNode, smartLoopContext)
+        ? workflowInputNodesFor(currentNode)
+        : inputNodesFor(currentNode);
+    const sourceIds = sourceNodes.map(n => n.id).filter(Boolean);
+    if(!sourceIds.includes(movedId) || !sourceIds.includes(targetId)) return false;
+    const nextIds = movedBeforeAfterIds(sourceIds, movedId, targetId, placement);
+    if(sameOrderedIds(sourceIds, nextIds)) return false;
+    const oldExplicitIds = Array.isArray(currentNode.inputNodeIds) ? currentNode.inputNodeIds.filter(Boolean) : [];
+    currentNode.inputNodeIds = [
+        ...nextIds.filter(id => oldExplicitIds.includes(id)),
+        ...oldExplicitIds.filter(id => !nextIds.includes(id))
+    ];
+    if(canvas && Array.isArray(canvas.connections)){
+        const order = new Map(nextIds.map((id, index) => [id, index]));
+        const relevantSlots = new Set();
+        const relevant = [];
+        canvas.connections.forEach((conn, index) => {
+            const kind = conn?.kind || 'flow';
+            if(conn?.to === currentNode.id && ['input', 'flow'].includes(kind) && order.has(conn.from)){
+                relevantSlots.add(index);
+                relevant.push({conn, index});
+            }
+        });
+        if(relevant.length){
+            relevant.sort((a, b) => (order.get(a.conn.from) - order.get(b.conn.from)) || (a.index - b.index));
+            let cursor = 0;
+            canvas.connections = canvas.connections.map((conn, index) => relevantSlots.has(index) ? relevant[cursor++].conn : conn);
+        }
+    }
+    return true;
+}
+function reorderInputThumb(currentNode, items, from, to, placement='before'){
     // items are already sourced from inputImagesFor → multiple source nodes possible.
-    // We reorder by repositioning the X coordinates of source nodes if they're separate,
-    // OR by swapping within a single source node's images.
+    // Reorder within a source group's images first; separate input nodes use the
+    // current node's input order, with a visual-position swap as a final fallback.
     if(from < 0 || to < 0 || from >= items.length || to >= items.length) return;
     const fromImg = items[from];
     const toImg = items[to];
@@ -5600,18 +8015,26 @@ function reorderInputThumb(currentNode, items, from, to){
         const ti = Number(toImg.imageIndex);
         if(Number.isFinite(fi) && Number.isFinite(ti) && (src.images || [])[fi]){
             const arr = src.images;
+            let insertAt = Math.max(0, Math.min(arr.length, ti + (placement === 'after' ? 1 : 0)));
             const item = arr.splice(fi, 1)[0];
-            arr.splice(ti, 0, item);
+            if(fi < insertAt) insertAt -= 1;
+            arr.splice(Math.max(0, Math.min(arr.length, insertAt)), 0, item);
         }
         render();
         scheduleSave();
         return;
     }
-    // Cross-node reorder: swap X positions of source nodes
+    const canReorderSources = currentNode && fromImg.nodeId && toImg.nodeId;
     const a = nodes.find(n => n.id === fromImg.nodeId);
     const b = nodes.find(n => n.id === toImg.nodeId);
-    if(!a || !b) return;
+    if(!canReorderSources || !a || !b) return;
     pushUndo();
+    if(reorderInputSourceNodes(currentNode, fromImg.nodeId, toImg.nodeId, placement)){
+        render();
+        scheduleSave();
+        return;
+    }
+    // Cross-node fallback: swap X positions of source nodes
     const ax = a.x, ay = a.y;
     a.x = b.x; a.y = b.y;
     b.x = ax; b.y = ay;
@@ -5793,6 +8216,9 @@ function hasSmartImageDropData(dataTransfer){
 function hasSmartAssetDrag(dataTransfer){
     return smartDropDataTypes(dataTransfer).includes('application/x-smart-asset');
 }
+function hasMediaDrawerDrag(dataTransfer){
+    return smartDropDataTypes(dataTransfer).includes('application/x-smart-asset');
+}
 function hasSmartInputThumbDrag(dataTransfer){
     return smartDropDataTypes(dataTransfer).includes('application/x-smart-input-thumb');
 }
@@ -5879,8 +8305,8 @@ async function handleSmartImageDropPayload(payload, targetId='', opts={}){
         toast(e.message || tr('smart.toastUploadFail'));
     }
 }
-function sizeForRun(){
-    return apiImageSize(settings.ratio || 'square', settings.resolution || '1k', settings.customRatio || '', settings.customSize || '') || '1024x1024';
+function sizeForRun(sourceSettings=settings){
+    return apiImageSize(sourceSettings.ratio || 'square', sourceSettings.resolution || '1k', sourceSettings.customRatio || '', sourceSettings.customSize || '') || '1024x1024';
 }
 function expectedOutputSize(){
     if(settings.engine === 'comfy'){
@@ -5902,7 +8328,7 @@ function expectedOutputSize(){
     return {w:1024, h:1024};
 }
 function explicitRequestOutputSizeForPending(){
-    if(settings.engine === 'api' && settings.apiKind !== 'video'){
+    if(isApiLikeEngine(settings.engine) && settings.apiKind !== 'video'){
         const parsed = parseSizeValue(sizeForRun());
         if(parsed) return {w:Number(parsed.width) || 1024, h:Number(parsed.height) || 1024};
     }
@@ -6107,7 +8533,7 @@ function workflowInputNodesFor(node){
     return upstreamNodesForKinds(node, ['input', 'flow']);
 }
 function imagesForNode(node){
-    return (node?.images || []).map((img, index) => ({...img, nodeId:node.id, imageIndex:index}));
+    return (node?.images || []).map((img, index) => ({...imageForDisplay(img), nodeId:node.id, imageIndex:index}));
 }
 function nodeHasReferenceContent(node){
     return imagesForNode(node).some(img => img?.url);
@@ -6399,6 +8825,16 @@ function inputMentionCandidateImages(node){
         alias:img.name || `图片${index + 1}`
     }));
 }
+// 一个素材可注册到多个平台：收集所有「已通过」的 asset:// 地址，按平台映射。
+function assetRegisteredUris(item){
+    const regs = (item && item.registrations && typeof item.registrations === 'object') ? item.registrations : {};
+    const out = {};
+    Object.keys(regs).forEach(platform => {
+        const reg = regs[platform];
+        if(reg && reg.status === 'Active' && reg.asset_uri) out[platform] = reg.asset_uri;
+    });
+    return out;
+}
 function assetMentionCandidateImages(categoryId=''){
     const cats = assetCategories('image');
     const cat = cats.find(c => c.id === categoryId) || assetCategoryForMention();
@@ -6417,6 +8853,7 @@ function assetMentionCandidateImages(categoryId=''){
         alias:item.name || `资产${index + 1}`,
         role:'asset',
         categoryName:item.categoryName || '',
+        asset_uris:assetRegisteredUris(item),
         mentionId:`asset_${index}_${Math.random().toString(36).slice(2, 7)}`
     }));
 }
@@ -6447,15 +8884,24 @@ function textBeforeCaret(){
 function renderMentionPicker(source){
     const node = selectedNode();
     const inputItems = inputMentionCandidateImages(node);
+    const assetLibs = assetLibraries();
+    if(!activeAssetLibraryId || !assetLibs.some(lib => lib.id === activeAssetLibraryId)) activeAssetLibraryId = assetLibrary.active_library_id || assetLibs[0]?.id || '';
+    const libraryWithMentionAssets = assetLibs.find(lib => (lib.categories || []).some(cat => (cat.type || 'image') === 'image' && (cat.items || []).some(item => item?.url)));
     const assetCats = assetCategories('image');
-    const currentAssetCat = assetCategoryForMention();
-    const assetItems = assetMentionCandidateImages(currentAssetCat?.id || '');
     const hasInput = inputItems.length > 0;
-    const hasAssets = assetCats.some(cat => (cat.items || []).some(item => item?.url));
+    const hasAssets = Boolean(libraryWithMentionAssets);
     mentionSource = source || (hasInput ? 'input' : 'asset');
+    if(mentionSource === 'asset' && hasAssets && !assetCats.some(cat => (cat.items || []).some(item => item?.url)) && libraryWithMentionAssets){
+        activeAssetLibraryId = libraryWithMentionAssets.id;
+        activeAssetCategoryId = '';
+        mentionAssetCategoryId = '';
+    }
     if(mentionSource === 'input' && !hasInput && hasAssets) mentionSource = 'asset';
     if(mentionSource === 'asset' && !hasAssets && hasInput) mentionSource = 'input';
     if(!hasInput && !hasAssets){ closeMentionPicker(); return; }
+    const nextAssetCats = assetCategories('image');
+    const currentAssetCat = assetCategoryForMention();
+    const assetItems = assetMentionCandidateImages(currentAssetCat?.id || '');
     const candidates = (mentionSource === 'asset' ? assetItems : inputItems).slice(0, 36);
     const body = candidates.length ? `<div class="mention-option-grid">${candidates.map((img, i) => `
             <button class="mention-option" type="button" data-mention-index="${i}">
@@ -6463,8 +8909,11 @@ function renderMentionPicker(source){
                 <span>${escapeHtml(img.alias)}</span>
             </button>
         `).join('')}</div>` : `<div class="mention-empty">${escapeHtml(tr('smart.mentionEmpty'))}</div>`;
-    const folderChips = (mentionSource === 'asset' && assetCats.length)
-        ? assetCats.map(cat => {
+    const librarySelect = (mentionSource === 'asset' && assetLibs.length)
+        ? `<label class="mention-library-row"><span>${escapeHtml(tr('smart.assetLibrary'))}</span><select class="mention-library-select" data-mention-library>${assetLibs.map(lib => `<option value="${escapeHtml(lib.id)}" ${lib.id === activeAssetLibraryId ? 'selected' : ''}>${escapeHtml(lib.name || '资产库')}</option>`).join('')}</select></label>`
+        : '';
+    const folderChips = (mentionSource === 'asset' && nextAssetCats.length)
+        ? nextAssetCats.map(cat => {
             const label = cat.name || tr('smart.assetFolder');
             return `<button class="mention-folder-chip ${cat.id === mentionAssetCategoryId ? 'active' : ''}" type="button" data-mention-folder="${escapeHtml(cat.id)}" title="${escapeHtml(label)}">${escapeHtml(label)}</button>`;
           }).join('')
@@ -6479,6 +8928,7 @@ function renderMentionPicker(source){
                     <i data-lucide="library"></i><span>${escapeHtml(tr('smart.mentionAssets'))}</span>
                 </button>
             </div>
+            ${librarySelect}
             <div class="mention-folder-chips ${folderChips ? '' : 'hidden'}">
                 ${folderChips}
             </div>
@@ -6495,6 +8945,16 @@ function renderMentionPicker(source){
             e.preventDefault(); e.stopPropagation();
             if(btn.disabled) return;
             renderMentionPicker(btn.dataset.mentionSource);
+        });
+    });
+    mentionPicker.querySelectorAll('[data-mention-library]').forEach(select => {
+        select.addEventListener('mousedown', e => e.stopPropagation());
+        select.addEventListener('change', e => {
+            activeAssetLibraryId = e.target.value || '';
+            activeAssetCategoryId = '';
+            mentionAssetCategoryId = '';
+            renderAssetLibrary();
+            renderMentionPicker('asset');
         });
     });
     mentionPicker.querySelectorAll('[data-mention-folder]').forEach(btn => {
@@ -6584,6 +9044,7 @@ function insertMentionToken(img){
     token.dataset.kind = mediaKindForItem(img);
     token.dataset.nodeId = img.nodeId || '';
     token.dataset.imageIndex = String(img.imageIndex ?? '');
+    token.dataset.assetUris = JSON.stringify(img.asset_uris || {});
     token.innerHTML = token.dataset.kind === 'video'
         ? `<video src="${escapeHtml(img.url)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video><span>${escapeHtml(token.dataset.name)}</span>`
         : `<img src="${escapeHtml(img.url)}" alt=""><span>${escapeHtml(token.dataset.name)}</span>`;
@@ -6607,7 +9068,9 @@ function collectPromptParts(){
         }
         if(node.nodeType !== Node.ELEMENT_NODE) return;
         if(node.classList?.contains('mention-image-token')){
-            parts.push({type:'image', url:node.dataset.url || '', name:node.dataset.name || '图片', nodeId:node.dataset.nodeId || '', imageIndex:Number(node.dataset.imageIndex || 0)});
+            let assetUris = {};
+            try { assetUris = JSON.parse(node.dataset.assetUris || '{}') || {}; } catch(e) { assetUris = {}; }
+            parts.push({type:'image', url:node.dataset.url || '', name:node.dataset.name || '图片', nodeId:node.dataset.nodeId || '', imageIndex:Number(node.dataset.imageIndex || 0), asset_uris:assetUris});
             return;
         }
         if(node.tagName === 'BR') parts.push({type:'text', text:'\n'});
@@ -6771,6 +9234,26 @@ function loopOutputSlotsForRoot(rootNode){
             return (Number(a.y) || 0) - (Number(b.y) || 0);
         });
 }
+function loopOutputSlotForRound(rootNode, loopNode, roundIndex, slotIndex){
+    if(!rootNode?.id) return null;
+    const candidates = loopOutputSlotsForRoot(rootNode)
+        .filter(node => node.sourceNodeId === rootNode.id)
+        .filter(node => !loopNode?.id || !node.loopSourceId || node.loopSourceId === loopNode.id);
+    const untagged = candidates.filter(node => !Number.isFinite(Number(node.loopRoundIndex)) && !Number.isFinite(Number(node.loopSlotIndex)));
+    return candidates.find(node => Number(node.loopRoundIndex) === Number(roundIndex))
+        || candidates.find(node => Number(node.loopSlotIndex) === Number(slotIndex))
+        || untagged[Math.max(0, Number(slotIndex) || 0)]
+        || null;
+}
+function tagLoopOutputSlot(output, rootNode, loopNode, roundIndex, slotIndex){
+    if(!output) return output;
+    output.sourceNodeId = rootNode?.id || output.sourceNodeId || '';
+    output.loopSourceId = loopNode?.id || output.loopSourceId || '';
+    output.loopRootId = rootNode?.id || output.loopRootId || '';
+    output.loopRoundIndex = Number(roundIndex) || 0;
+    output.loopSlotIndex = Math.max(0, Number(slotIndex) || 0);
+    return output;
+}
 function createLoopOutputSlot(rootNode, roundIndex, roundOffset=0, options={}){
     const rootRect = nodeRect(rootNode);
     const output = cloneSmartNode(rootNode, 0, 0);
@@ -6799,6 +9282,7 @@ function createLoopOutputSlot(rootNode, roundIndex, roundOffset=0, options={}){
     delete output.runInputRefs;
     delete output.runFinishedAt;
     delete output.runElapsedMs;
+    tagLoopOutputSlot(output, rootNode, options.loopNode || null, roundIndex, options.slotIndex ?? roundOffset);
     const slots = loopOutputSlotsForRoot(rootNode).map(nodeRect);
     let y = (Number(rootNode.y) || 0) + roundOffset * ((Number(rootRect.height) || 180) + 28);
     slots.forEach(rect => {
@@ -6809,7 +9293,8 @@ function createLoopOutputSlot(rootNode, roundIndex, roundOffset=0, options={}){
     output.y = y;
     nodes.push(output);
     addConnection(rootNode.id, output.id, 'flow');
-    if(smartCascadeRunPath?.states) smartCascadeRunPath.states[`${rootNode.id}->${output.id}`] = 'wait';
+        const runPath = smartCascadePathForCtx(options.ctx || options.runState);
+        if(runPath?.states) runPath.states[`${rootNode.id}->${output.id}`] = 'wait';
     return output;
 }
 function extractCurrentImagesToSource(node, meta=null){
@@ -6888,6 +9373,69 @@ function restoreSourceVisualState(node, state){
         else node[key] = state[key];
     });
 }
+function finishLoopTargetPreviewState(node){
+    if(!node) return;
+    node.pending = 0;
+    node.running = false;
+    node.queued = false;
+    delete node.pendingTasks;
+    node.runFinishedAt = nowMs();
+    if(!node.runStartedAt) node.runStartedAt = node.runFinishedAt;
+    node.runElapsedMs = Math.max(0, node.runFinishedAt - Number(node.runStartedAt || node.runFinishedAt));
+    node.runTimerHidden = false;
+    if((node.images || []).some(img => img?.url)){
+        node.title = node.images.length > 1 ? 'Group' : 'Image';
+        node.scale = node.images.length > 1 ? MEDIA_GROUP_DEFAULT_SCALE : MEDIA_NODE_DEFAULT_SCALE;
+        node.outputKind = mediaKindForUrls(node.images || [], (node.images || []).some(isVideoMediaItem) ? 'video' : 'image');
+        delete node.w;
+        delete node.h;
+    }
+}
+function refsForDirectLoopRound(loopNode, loopIndex, total){
+    if(!loopNode?.imageInput) return [];
+    return outputImagesForNode(loopNode, true, {index:loopIndex, total, nodeId:loopNode.id})
+        .filter(ref => ref?.url)
+        .map((ref, index) => ({
+            ...ref,
+            role:ref.role || `image_${index + 1}`,
+            name:ref.name || trf('canvas.loopImageLabel', {n:loopIndex + index})
+        }));
+}
+function showDirectLoopRoundPreview(loopNode, target, refs, loopIndex, total){
+    if(!loopNode?.imageInput || !isSmartImageNode(target)) return false;
+    const cleanRefs = (refs || []).filter(ref => ref?.url);
+    if(!cleanRefs.length) return false;
+    const preview = cleanRefs.map((ref, index) => stripImageGenerationMeta({
+        url:ref.url || '',
+        name:ref.name || trf('canvas.loopImageLabel', {n:loopIndex + index}),
+        kind:ref.kind || (isVideoMediaItem(ref) ? 'video' : 'image'),
+        nodeId:ref.nodeId || '',
+        imageIndex:ref.imageIndex ?? '',
+        loopInputPreview:true
+    })).filter(ref => ref.url);
+    if(!preview.length) return false;
+    target.images = preview;
+    target.pending = 0;
+    target.running = true;
+    target.runStartedAt = nowMs();
+    delete target.runFinishedAt;
+    delete target.runElapsedMs;
+    target.runTimerHidden = false;
+    target.runInputRefs = cleanRefs.map(ref => ({
+        url:ref.url || '',
+        name:ref.name || '',
+        nodeId:ref.nodeId || '',
+        imageIndex:ref.imageIndex ?? '',
+        kind:ref.kind || ''
+    })).filter(ref => ref.url);
+    target.outputKind = mediaKindForUrls(preview, preview.some(isVideoMediaItem) ? 'video' : 'image');
+    target.scale = preview.length > 1 ? MEDIA_GROUP_DEFAULT_SCALE : MEDIA_NODE_DEFAULT_SCALE;
+    target.title = total > 1 ? `Image ${loopIndex}/${total}` : (target.title || 'Image');
+    delete target.w;
+    delete target.h;
+    render();
+    return true;
+}
 function directImageInputsFor(node){
     const upstream = smartImageUsesWorkflowInput(node) ? workflowInputNodesFor(node) : inputNodesFor(node);
     return upstream
@@ -6923,6 +9471,15 @@ function primaryImageInputFor(node, options={}){
 }
 function hasDownstreamImageNode(node){
     return downstreamNodesForId(node?.id).some(n => isSmartImageNode(n) && !isHistoryGroupNode(n));
+}
+function isGeneratedOutputForNode(sourceNode, targetNode){
+    return Boolean(sourceNode?.id && targetNode?.sourceNodeId === sourceNode.id);
+}
+function downstreamWorkflowImageTargetsFor(node){
+    return downstreamImageTargetsFor(node).filter(target => !isGeneratedOutputForNode(node, target));
+}
+function hasDownstreamWorkflowImageNode(node){
+    return downstreamWorkflowImageTargetsFor(node).length > 0;
 }
 function smartImageChainTo(nodeId, options={}){
     const tail = nodes.find(n => n.id === nodeId);
@@ -7009,6 +9566,11 @@ function downstreamCascadeTargetsFor(node){
             return (Number(a.y) || 0) - (Number(b.y) || 0);
         });
 }
+function directLoopRunTargets(loop){
+    if(!loop?.id) return [];
+    return downstreamImageTargetsFor(loop)
+        .filter(node => !hasDownstreamWorkflowImageNode(node));
+}
 function smartCascadeGraphForTail(tail){
     const path = smartImageChainTo(tail?.id, {includeFlow:true}).filter(n => isSmartImageNode(n) && !isHistoryGroupNode(n));
     if(!path.length) return {root:null, path:[], edges:[], children:new Map()};
@@ -7039,6 +9601,9 @@ function smartCascadeGraphForTail(tail){
     return {root, path, edges, children};
 }
 function cascadeTailForLoop(loopId){
+    const loop = nodes.find(n => n.id === loopId && n.type === 'smart-loop');
+    const directTargets = directLoopRunTargets(loop);
+    if(directTargets.length) return directTargets[directTargets.length - 1];
     const directImages = downstreamImageTargetsFor({id:loopId});
     const directIds = new Set(directImages.map(n => n.id));
     const candidates = downstreamNodesForId(loopId)
@@ -7056,18 +9621,28 @@ function cascadeTailForLoop(loopId){
     })[0];
 }
 function canRunSmartCascade(node){
-    if(!isSmartImageNode(node) || isHistoryGroupNode(node) || hasDownstreamImageNode(node)) return false;
+    if(!isSmartImageNode(node) || isHistoryGroupNode(node)) return false;
     const graph = smartCascadeGraphForTail(node);
+    const loop = resolveSmartCascadeLoop(node.id);
+    if(loop && isDirectLoopTargetRun(loop, node, graph)) return true;
+    if(hasDownstreamImageNode(node)) return false;
     if(graph.edges.length) return true;
-    return Boolean(resolveSmartCascadeLoop(node.id));
+    return Boolean(loop);
+}
+function isDirectLoopTargetRun(loop, tail, graph){
+    if(!loop?.node?.id || !tail?.id) return false;
+    if(graph?.root?.id !== tail.id) return false;
+    if(hasDownstreamWorkflowImageNode(tail)) return false;
+    return downstreamImageTargetsFor(loop.node).some(node => node.id === tail.id);
 }
 function cascadeConnectionKeys(){
     const keys = new Set();
     const addKey = (from, to) => {
         if(from && to) keys.add(`${from}->${to}`);
     };
-    const loops = smartCascadeRunning && smartCascadeActiveLoopId
-        ? nodes.filter(n => n?.type === 'smart-loop' && n.id === smartCascadeActiveLoopId)
+    const activeLoopIds = new Set(smartCascadeRuns.keys());
+    const loops = activeLoopIds.size
+        ? nodes.filter(n => n?.type === 'smart-loop' && activeLoopIds.has(n.id))
         : nodes.filter(n => n?.type === 'smart-loop');
     loops.forEach(loop => {
         const tail = cascadeTailForLoop(loop.id);
@@ -7092,7 +9667,7 @@ function coolRunButton(ms=2000){
     const token = ++runBtnCooldownToken;
     runBtn.disabled = true;
     setTimeout(() => {
-        if(token === runBtnCooldownToken && !smartCascadeRunning) runBtn.disabled = false;
+        if(token === runBtnCooldownToken && !smartCascadeAnyRunning()) runBtn.disabled = false;
     }, ms);
     return token;
 }
@@ -7154,7 +9729,7 @@ function demoteHistoryGroupNode(group){
     delete group.isHistoryGroup;
     if(group.title === '历史分组'){
         const count = (group.images || []).length;
-        group.title = count > 1 ? 'Group' : count === 1 ? 'Image' : '上传卡片';
+        group.title = count > 1 ? 'Group' : count === 1 ? 'Image' : tr('smart.createImportNode');
     }
 }
 function historyGroupForNode(node){
@@ -7266,7 +9841,15 @@ function syncCascadeRunButton(node=selectedNode()){
     if(!cascadeRunBtn) return;
     const visible = canRunSmartCascade(node);
     cascadeRunBtn.style.display = visible ? 'inline-flex' : 'none';
-    cascadeRunBtn.disabled = !visible || smartCascadeRunning || Boolean(node?.running);
+    const nodeLoopId = resolveSmartCascadeLoop(node?.id)?.node?.id || '';
+    const loopRunState = smartCascadeRunForLoop(nodeLoopId);
+    const runningForNode = Boolean(loopRunState);
+    cascadeRunBtn.disabled = !visible || (!runningForNode && Boolean(node?.running)) || Boolean(loopRunState?.stopRequested);
+    cascadeRunBtn.classList.toggle('is-stop', runningForNode);
+    cascadeRunBtn.innerHTML = runningForNode
+        ? `<i data-lucide="square"></i><span>${escapeHtml(smartCascadeStopText(Boolean(loopRunState?.stopRequested)))}</span>`
+        : `<i data-lucide="workflow"></i><span>${escapeHtml(tr('smart.loopRunAll'))}</span>`;
+    refreshIcons();
 }
 function loadNodePromptDraftToInput(node){
     if(node?.promptDraftHtml) {
@@ -7289,8 +9872,10 @@ function buildPromptRequestForNode(node, defaultImages, ctx=smartLoopContext){
         promptInput.innerHTML = oldHtml;
     }
 }
-async function generateUrlsForCurrentSettings(node, prompt, refs){
-    if(settings.engine === 'comfy'){
+async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=settings){
+    const activeSettings = runSettings || settings;
+    if(activeSettings.engine === 'comfy') return generateComfyUrlsWithSettings(activeSettings, prompt, refs);
+    if(activeSettings.engine === 'comfy'){
         const allRefs = refs || [];
         const imageRefs = imageRefsOnly(allRefs);
         const mode = settings.comfyMode || 'text';
@@ -7361,11 +9946,11 @@ async function generateUrlsForCurrentSettings(node, prompt, refs){
         const fallbackKind = result.videos?.length ? 'video' : result.audios?.length ? 'audio' : result.texts?.length ? 'text' : 'image';
         return {urls, kind:mediaKindForUrls(urls, fallbackKind)};
     }
-    if(settings.engine === 'api' && settings.apiKind === 'video'){
-        return {urls:await runApiVideoGeneration(prompt, refs), kind:'video'};
+    if(isApiLikeEngine(activeSettings.engine) && activeSettings.apiKind === 'video'){
+        return {urls:await runApiVideoGeneration(prompt, refs, activeSettings), kind:'video'};
     }
-    if(settings.engine === 'api'){
-        const taskResult = await runApiGeneration(prompt, refs);
+    if(isApiLikeEngine(activeSettings.engine)){
+        const taskResult = await runApiGeneration(prompt, refs, activeSettings);
         const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
         if(taskIds.length){
             const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasTask(taskId)));
@@ -7375,10 +9960,10 @@ async function generateUrlsForCurrentSettings(node, prompt, refs){
         const urls = resultMediaUrls(taskResult);
         return {urls, kind:mediaKindForUrls(urls, 'image')};
     }
-    const urls = settings.engine === 'runninghub'
-        ? await runRunningHubGeneration(prompt, refs)
-        : settings.engine === 'modelscope'
-            ? await runModelscopeGeneration(prompt, refs)
+    const urls = activeSettings.engine === 'runninghub'
+        ? await runRunningHubGeneration(prompt, refs, activeSettings)
+        : activeSettings.engine === 'modelscope'
+            ? await runModelscopeGeneration(prompt, refs, activeSettings)
             : [];
     return {urls, kind:mediaKindForUrls(urls, 'image')};
 }
@@ -7458,7 +10043,8 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
     if(!sourceNode || !targetNode || !outputNode) return [];
     const requestNode = sourceNode?.type === 'smart-loop' ? targetNode : sourceNode;
     const previousSettings = cloneSmartSettings(settings);
-    settings = {...settings, ...cloneSmartSettings(smartSettingsForNode(requestNode) || {})};
+    const runSettings = {...cloneSmartSettings(settings), ...cloneSmartSettings(smartSettingsForNode(requestNode) || {})};
+    settings = runSettings;
     const outpaintSize = validOutpaintSize(requestNode);
     const selfRefs = sourceNode?.type === 'smart-loop' ? [] : selfReferenceImagesForNode(sourceNode, false, ctx).filter(img => img?.url);
     const sourceRefs = (selfRefs.length ? selfRefs : defaultReferenceImagesFor(requestNode, false, ctx)).filter(img => img?.url);
@@ -7472,7 +10058,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
     );
     const prompt = (request.prompt || '').trim();
     const displayPrompt = (request.displayPrompt || '').trim();
-    if(!prompt || (!displayPrompt && !(settings.engine === 'comfy' && settings.comfyMode === 'enhance'))){
+    if(!prompt || (!displayPrompt && !(runSettings.engine === 'comfy' && runSettings.comfyMode === 'enhance'))){
         settings = previousSettings;
         throw new Error('链路节点缺少提示词');
     }
@@ -7482,14 +10068,14 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
         promptRefs:(request.refs || []).map(ref => ({url:ref.url || '', name:ref.name || '', nodeId:ref.nodeId || '', imageIndex:ref.imageIndex ?? ''})).filter(ref => ref.url),
         inputRefs:(request.refs || []).map(ref => ({url:ref.url || '', name:ref.name || '', nodeId:ref.nodeId || '', imageIndex:ref.imageIndex ?? '', kind:ref.kind || ''})).filter(ref => ref.url),
         sourceNodeId:sourceNode.id,
-        settings:JSON.parse(JSON.stringify(settings)),
+        settings:JSON.parse(JSON.stringify(runSettings)),
         createdAt:Date.now()
     };
     if(requestNode.promptDraftHtml != null){
         meta.promptHtml = requestNode.promptDraftHtml;
         meta.promptText = requestNode.promptDraftText || request.displayPrompt || '';
     }
-    const logKind = settings.engine === 'api' && settings.apiKind === 'video' ? 'video' : 'image';
+    const logKind = isApiLikeEngine(runSettings.engine) && runSettings.apiKind === 'video' ? 'video' : 'image';
     const runLog = smartRunSnapshot(requestNode, prompt, request.refs || [], logKind);
     const runLogStart = nowMs();
     const targetPromptState = {
@@ -7508,10 +10094,11 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
     delete outputNode.runFinishedAt;
     delete outputNode.runElapsedMs;
     outputNode.runTimerHidden = false;
-    rememberRecentSmartSettings(settings, requestNode);
+    rememberRecentSmartSettings(runSettings, requestNode);
     render();
+    settings = previousSettings;
     try {
-        const result = await generateUrlsForCurrentSettings(outputNode, prompt, request.refs || []);
+        const result = await generateUrlsForCurrentSettings(outputNode, prompt, request.refs || [], runSettings);
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         if(outpaintSize) delete requestNode.outpaintSize;
         addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind}, outputs:result.urls, runMs:nowMs() - runLogStart});
@@ -7539,9 +10126,13 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
         render();
         return additions;
     } catch(e) {
+        settings = previousSettings;
+        if(handleJimengPendingSignal(outputNode, e)){
+            render();
+            return [];
+        }
         outputNode.running = false;
         addSmartGenerationLog({run:runLog, outputs:[], runMs:nowMs() - runLogStart, error:e.message || String(e)});
-        settings = previousSettings;
         render();
         throw e;
     }
@@ -7557,21 +10148,21 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         const request = buildPromptRequestForNode(rootNode, refsForRequest.length ? refsForRequest : null, ctx);
         const prompt = (request.prompt || '').trim();
         const displayPrompt = (request.displayPrompt || '').trim();
-        if(!prompt || (!displayPrompt && !(settings.engine === 'comfy' && settings.comfyMode === 'enhance'))) throw new Error('链路节点缺少提示词');
+        if(!prompt || (!displayPrompt && !(runSettings.engine === 'comfy' && runSettings.comfyMode === 'enhance'))) throw new Error('链路节点缺少提示词');
         const meta = {
             prompt,
             displayPrompt:request.displayPrompt || '',
             promptRefs:(request.refs || []).map(ref => ({url:ref.url || '', name:ref.name || '', nodeId:ref.nodeId || '', imageIndex:ref.imageIndex ?? ''})).filter(ref => ref.url),
             inputRefs:(request.refs || []).map(ref => ({url:ref.url || '', name:ref.name || '', nodeId:ref.nodeId || '', imageIndex:ref.imageIndex ?? '', kind:ref.kind || ''})).filter(ref => ref.url),
             sourceNodeId:rootNode.id,
-            settings:JSON.parse(JSON.stringify(settings)),
+            settings:JSON.parse(JSON.stringify(runSettings)),
             createdAt:Date.now()
         };
-        const logKind = settings.engine === 'api' && settings.apiKind === 'video' ? 'video' : 'image';
+        const logKind = isApiLikeEngine(runSettings.engine) && runSettings.apiKind === 'video' ? 'video' : 'image';
         const runLog = smartRunSnapshot(rootNode, prompt, request.refs || [], logKind);
         const runLogStart = nowMs();
-        const expectedCount = settings.engine === 'api' && settings.apiKind !== 'video'
-            ? Math.max(1, Math.min(8, Number(settings.count || 1)))
+        const expectedCount = isApiLikeEngine(runSettings.engine) && runSettings.apiKind !== 'video'
+            ? Math.max(1, Math.min(8, Number(runSettings.count || 1)))
             : 1;
         outputSlot.queued = false;
         outputSlot.running = true;
@@ -7580,14 +10171,16 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         delete outputSlot.runFinishedAt;
         delete outputSlot.runElapsedMs;
         outputSlot.runTimerHidden = false;
-        if(smartCascadeRunPath?.states) {
-            smartCascadeRunPath.states[edgeKey] = 'active';
+        const runPath = smartCascadePathForCtx(ctx);
+        if(runPath?.states) {
+            runPath.states[edgeKey] = 'active';
             refreshConnectionLayer();
         }
         render();
+        settings = previousSettings;
         let result;
-        if(settings.engine === 'api' && settings.apiKind !== 'video'){
-            const taskResult = await runApiGeneration(prompt, request.refs || []);
+        if(isApiLikeEngine(runSettings.engine) && runSettings.apiKind !== 'video'){
+            const taskResult = await runApiGeneration(prompt, request.refs || [], runSettings);
             const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
             const existing = cleanHistoryImages(outputSlot.images || []);
@@ -7608,15 +10201,17 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             scheduleSave();
             await saveCanvas();
             await resumeSmartPendingNode(outputSlot);
+            if(outputSlot.jimengPending){
+                outputSlot.queued = false;
+                return [];
+            }
             result = {urls:(outputSlot.images || []).map(img => img?.url ? img : null).filter(Boolean), kind:'image'};
         } else {
-            result = runSettings.engine === 'comfy'
-                ? await generateComfyUrlsWithSettings(runSettings, prompt, request.refs || [])
-                : await generateUrlsForCurrentSettings(outputSlot, prompt, request.refs || []);
+            result = await generateUrlsForCurrentSettings(outputSlot, prompt, request.refs || [], runSettings);
         }
         if(!result.urls?.length) throw new Error(result.kind === 'video' ? tr('smart.errNoOutVideos') : tr('smart.errNoOutImages'));
         let additions;
-        if(settings.engine === 'api' && settings.apiKind !== 'video'){
+        if(isApiLikeEngine(runSettings.engine) && runSettings.apiKind !== 'video'){
             additions = (outputSlot.images || []).map(img => stripImageGenerationMeta({...img})).filter(img => img?.url);
             if(meta) attachRunMeta(outputSlot, meta);
         } else {
@@ -7627,13 +10222,17 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             }).filter(item => item.url);
             replaceOutputsToNodeWithHistory(outputSlot, additions, result.kind, meta, {skipShift:Boolean(ctx?.nodeId)});
         }
-        if(smartCascadeRunPath?.states) {
-            smartCascadeRunPath.states[edgeKey] = 'done';
+        if(runPath?.states) {
+            runPath.states[edgeKey] = 'done';
             refreshConnectionLayer();
         }
         addSmartGenerationLog({run:{...runLog, kind:result.kind || logKind}, outputs:result.urls, runMs:nowMs() - runLogStart});
         return additions;
     } catch(e) {
+        if(handleJimengPendingSignal(outputSlot, e)){
+            outputSlot.queued = false;
+            return [];
+        }
         outputSlot.queued = false;
         outputSlot.pending = 0;
         outputSlot.running = false;
@@ -7642,7 +10241,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         settings = previousSettings;
     }
 }
-function appendCascadeRefsToReceiver(node, refs){
+function appendCascadeRefsToReceiver(node, refs, ctx=smartLoopContext){
     if(!node || !refs?.length) return [];
     const additions = refs
         .filter(ref => ref?.url)
@@ -7652,7 +10251,7 @@ function appendCascadeRefsToReceiver(node, refs){
             kind:ref.kind || (isVideoMediaItem(ref) ? 'video' : 'image')
         }));
     if(!additions.length) return [];
-    replaceOutputsToNodeWithHistory(node, additions, mediaKindForUrls(additions, additions.some(isVideoMediaItem) ? 'video' : 'image'), null, {skipShift:Boolean(smartLoopContext?.nodeId)});
+    replaceOutputsToNodeWithHistory(node, additions, mediaKindForUrls(additions, additions.some(isVideoMediaItem) ? 'video' : 'image'), null, {skipShift:Boolean(ctx?.nodeId)});
     render();
     return additions;
 }
@@ -7666,18 +10265,48 @@ function cascadeRefsFromOutputs(outputs, targetNode){
         imageIndex:targetNode ? (targetNode.images || []).length - outputs.length + index : index
     }));
 }
+function smartCascadeStopText(stopping=false){
+    return stopping ? '停止中...' : '停止运行';
+}
+function smartCascadeAbortError(){
+    const err = new Error('已停止一键运行');
+    err.smartCascadeStopped = true;
+    return err;
+}
+function throwIfSmartCascadeStopRequested(runState=null){
+    if(runState?.stopRequested || (!runState && smartCascadeStopRequested)) throw smartCascadeAbortError();
+}
+function requestSmartCascadeStop(loopId=''){
+    const runState = loopId ? smartCascadeRunForLoop(loopId) : (smartCascadeRuns.get(smartCascadeActiveLoopId) || [...smartCascadeRuns.values()][0] || null);
+    if(runState){
+        if(runState.stopRequested) return;
+        runState.stopRequested = true;
+        syncSmartCascadeLegacyState(runState.runKey || runState.loopId || loopId);
+    } else {
+        if(!smartCascadeRunning || smartCascadeStopRequested) return;
+        smartCascadeStopRequested = true;
+    }
+    toast('已请求停止，当前任务完成后停止');
+    render();
+}
 function smartCascadeParallelLimit(chain=[]){
     const hasComfy = (chain || []).some(node => smartSettingsForNode(node)?.engine === 'comfy');
     return hasComfy ? Math.max(1, Math.min(6, Number(comfyInstanceCount) || 1)) : 6;
 }
-async function runSmartCascadeRoundsWithLimit(roundIndexes, limit, runner){
+async function runSmartCascadeRoundsWithLimit(roundIndexes, limit, runner, runState=null){
     let next = 0;
     const workerCount = Math.max(1, Math.min(Number(limit) || 1, roundIndexes.length));
     const workers = Array.from({length:workerCount}, async () => {
         while(next < roundIndexes.length){
+            if(runState?.stopRequested || (!runState && smartCascadeStopRequested)) break;
             const roundOffset = next++;
             const current = roundIndexes[roundOffset];
-            await runner(current, roundOffset);
+            try {
+                await runner(current, roundOffset);
+            } catch(e) {
+                if(e?.smartCascadeStopped) break;
+                throw e;
+            }
         }
     });
     await Promise.all(workers);
@@ -7685,21 +10314,26 @@ async function runSmartCascadeRoundsWithLimit(roundIndexes, limit, runner){
 async function runSmartCascade(targetNode=null){
     const tail = targetNode || selectedNode();
     if(!canRunSmartCascade(tail)){ toast('请选择链路结尾图片节点'); return; }
-    if(smartCascadeRunning) return;
     savePromptDraftForCurrent();
     const graph = smartCascadeGraphForTail(tail);
     const chain = graph.path;
     const loop = resolveSmartCascadeLoop(tail.id);
-    const singleNodeLoopRun = Boolean(loop && chain.length === 1);
+    const loopId = loop?.node?.id || '';
+    if(loopId && smartCascadeIsLoopRunning(loopId)){ requestSmartCascadeStop(loopId); return; }
+    if(!loopId && smartCascadeAnyRunning()){ requestSmartCascadeStop(); return; }
+    const directLoopTargetRun = Boolean(loop && isDirectLoopTargetRun(loop, tail, graph));
+    const singleNodeLoopRun = Boolean(loop && (chain.length === 1 || directLoopTargetRun));
     if(!graph.edges.length && !singleNodeLoopRun){ toast(tr('smart.loopNoChain')); return; }
     const originalSelected = selectedId;
     const originalSettings = cloneSmartSettings(settings);
     const originalPromptHtml = promptInput.innerHTML;
-    smartCascadeRunning = true;
-    smartCascadeActiveLoopId = loop?.node?.id || '';
+    const runKey = loopId || `cascade-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const runState = {runKey, loopId, stopRequested:false, runPath:null};
+    smartCascadeRuns.set(runKey, runState);
+    syncSmartCascadeLegacyState(runKey);
     smartCascadeSilentSelection = true;
     runBtn.disabled = true;
-    cascadeRunBtn.disabled = true;
+    cascadeRunBtn.disabled = false;
     pushUndo();
     const totalRounds = loop?.count || 1;
     const startIndex = Math.max(1, Number(loop?.node?.loopStart) || 1);
@@ -7709,13 +10343,23 @@ async function runSmartCascade(targetNode=null){
     const parallelLimit = loopMode === 'parallel' && totalRounds > 1 ? smartCascadeParallelLimit(chain) : 1;
     const precreateSingleSlots = singleNodeLoopRun && loopMode === 'parallel' && totalRounds > 1 && parallelLimit > 1;
     let singleLoopSlots = [];
-    if(singleNodeLoopRun) smartCascadeRunPath = {states:{}};
     if(singleNodeLoopRun){
-        singleLoopSlots = loopOutputSlotsForRoot(tail).slice(0, totalRounds);
-        singleLoopSlots.forEach(slot => { smartCascadeRunPath.states[`${tail.id}->${slot.id}`] = 'wait'; });
-        while(precreateSingleSlots && singleLoopSlots.length < totalRounds){
-            const slotOffset = singleLoopSlots.length;
-            singleLoopSlots.push(createLoopOutputSlot(tail, startIndex + slotOffset * batchSize, slotOffset, {queued:true}));
+        runState.runPath = {states:{}};
+        smartCascadeRunPath = runState.runPath;
+    }
+    if(singleNodeLoopRun){
+        singleLoopSlots = Array.from({length:totalRounds}, (_, round) => {
+            const loopIndex = startIndex + round * batchSize;
+            const slot = loopOutputSlotForRound(tail, loop.node, loopIndex, round);
+            return slot ? tagLoopOutputSlot(slot, tail, loop.node, loopIndex, round) : null;
+        });
+        singleLoopSlots.filter(Boolean).forEach(slot => { runState.runPath.states[`${tail.id}->${slot.id}`] = 'wait'; });
+        if(precreateSingleSlots){
+            for(let slotOffset = 0; slotOffset < totalRounds; slotOffset++){
+                if(singleLoopSlots[slotOffset]) continue;
+                const loopIndex = startIndex + slotOffset * batchSize;
+                singleLoopSlots[slotOffset] = createLoopOutputSlot(tail, loopIndex, slotOffset, {queued:true, loopNode:loop.node, slotIndex:slotOffset, runState});
+            }
         }
         render();
     }
@@ -7723,29 +10367,40 @@ async function runSmartCascade(targetNode=null){
         const runStates = {};
         if(loop?.node?.id && graph.root?.id) runStates[`${loop.node.id}->${graph.root.id}`] = 'wait';
         graph.edges.forEach(edge => { runStates[edge.key] = 'wait'; });
-        smartCascadeRunPath = {states:runStates};
+        runState.runPath = {states:runStates};
+        smartCascadeRunPath = runState.runPath;
         refreshConnectionLayer();
         updateComposer();
     }
     try {
         const runRound = async (loopIndex=startIndex, options={}) => {
-            const ctx = loop ? {index:loopIndex, total:endIndex, nodeId:loop.node.id, forceWorkflow:chain.length > 1} : null;
-            smartLoopContext = ctx;
+            throwIfSmartCascadeStopRequested(runState);
+            const ctx = loop ? {index:loopIndex, total:endIndex, nodeId:loop.node.id, forceWorkflow:chain.length > 1 && !singleNodeLoopRun, runState} : {runState};
+            if(parallelLimit === 1) smartLoopContext = ctx;
             if(singleNodeLoopRun){
+                const refs = refsForDirectLoopRound(loop.node, loopIndex, endIndex);
+                if(directLoopTargetRun && parallelLimit === 1) showDirectLoopRoundPreview(loop.node, tail, refs, loopIndex, endIndex);
                 const slotIndex = Math.max(0, Math.floor((loopIndex - startIndex) / batchSize));
-                const outputTarget = options.outputTarget || singleLoopSlots[slotIndex] || createLoopOutputSlot(tail, loopIndex, slotIndex);
-                if(!singleLoopSlots[slotIndex]) singleLoopSlots[slotIndex] = outputTarget;
+                const outputTarget = tagLoopOutputSlot(
+                    options.outputTarget || singleLoopSlots[slotIndex] || loopOutputSlotForRound(tail, loop.node, loopIndex, slotIndex) || createLoopOutputSlot(tail, loopIndex, slotIndex, {loopNode:loop.node, slotIndex, runState}),
+                    tail,
+                    loop.node,
+                    loopIndex,
+                    slotIndex
+                );
+                singleLoopSlots[slotIndex] = outputTarget;
                 await runLoopRoundIntoSlot(loop.node, tail, outputTarget, loopIndex, ctx);
                 return;
             }
             const producedRefs = new Map();
             const runBranch = async (source, incomingRefs=[]) => {
+                throwIfSmartCascadeStopRequested(runState);
                 let targets = graph.children.get(source.id) || [];
                 const loopPrompts = isSmartImageNode(source) ? upstreamLoopPromptNodesFor(source) : [];
                 const sourceLoopPrompts = isSmartImageNode(source) ? relayLoopPromptNodesForTarget(source) : [];
-                if(smartCascadeRunPath && sourceLoopPrompts.length && source?.id){
+                if(runState.runPath && sourceLoopPrompts.length && source?.id){
                     sourceLoopPrompts.forEach(loopNode => {
-                        smartCascadeRunPath.states[`${loopNode.id}->${source.id}`] = 'done';
+                        runState.runPath.states[`${loopNode.id}->${source.id}`] = 'done';
                     });
                     refreshConnectionLayer();
                 }
@@ -7754,14 +10409,15 @@ async function runSmartCascade(targetNode=null){
                     const startBase = Math.max(1, Number(firstLoop.loopStart) || 1);
                     const currentIndex = Math.max(1, Number(ctx?.index || startBase) || startBase);
                     const selectedTarget = targets[(currentIndex - 1) % targets.length];
-                    if(smartCascadeRunPath && firstLoop?.id && source?.id){
-                        smartCascadeRunPath.states[`${firstLoop.id}->${source.id}`] = 'done';
+                    if(runState.runPath && firstLoop?.id && source?.id){
+                        runState.runPath.states[`${firstLoop.id}->${source.id}`] = 'done';
                         refreshConnectionLayer();
                     }
                     targets = [selectedTarget].filter(Boolean);
                 }
                 let sharedRefs = incomingRefs;
                 for(let index = 0; index < targets.length; index++){
+                    throwIfSmartCascadeStopRequested(runState);
                     const target = targets[index];
                     const edgeKey = `${source.id}->${target.id}`;
                     let outputs = [];
@@ -7772,14 +10428,14 @@ async function runSmartCascade(targetNode=null){
                         ? {...(ctx || {}), relayPromptNodeIds:[...new Set([...(ctx?.relayPromptNodeIds || []), ...relayLoops.map(n => n.id)])]}
                         : ctx;
                     try {
-                        if(smartCascadeRunPath && relayLoops.length && source?.id && isSmartImageNode(target)){
+                        if(runState.runPath && relayLoops.length && source?.id && isSmartImageNode(target)){
                             relayLoops.forEach(loopNode => {
-                                smartCascadeRunPath.states[`${loopNode.id}->${source.id}`] = 'done';
+                                runState.runPath.states[`${loopNode.id}->${source.id}`] = 'done';
                             });
                             refreshConnectionLayer();
                         }
-                        if(smartCascadeRunPath){
-                            smartCascadeRunPath.states[edgeKey] = 'active';
+                        if(runState.runPath){
+                            runState.runPath.states[edgeKey] = 'active';
                             refreshConnectionLayer();
                         }
                         if(target.type === 'smart-loop'){
@@ -7789,11 +10445,11 @@ async function runSmartCascade(targetNode=null){
                             outputs = await runCascadeStepIntoNode(source, target, incomingRefs, stepCtx);
                             sharedRefs = cascadeRefsFromOutputs(outputs, target);
                         } else {
-                            outputs = appendCascadeRefsToReceiver(target, sharedRefs);
+                            outputs = appendCascadeRefsToReceiver(target, sharedRefs, stepCtx);
                         }
                     } catch(err) {
                         if(/缺少提示词|需要输入文本|need prompt/i.test(err.message || '') && incomingRefs.length){
-                            outputs = appendCascadeRefsToReceiver(target, incomingRefs);
+                            outputs = appendCascadeRefsToReceiver(target, incomingRefs, stepCtx);
                             if(index === 0){
                                 sharedRefs = cascadeRefsFromOutputs(outputs, target);
                             }
@@ -7801,12 +10457,13 @@ async function runSmartCascade(targetNode=null){
                             throw err;
                         }
                     }
-                    if(smartCascadeRunPath){
-                        smartCascadeRunPath.states[edgeKey] = 'done';
+                    if(runState.runPath){
+                        runState.runPath.states[edgeKey] = 'done';
                         refreshConnectionLayer();
                     }
                     const refs = target.type === 'smart-loop' ? sharedRefs : (index === 0 ? sharedRefs : cascadeRefsFromOutputs(outputs, target));
                     producedRefs.set(target.id, refs);
+                    throwIfSmartCascadeStopRequested(runState);
                     await runBranch(target, refs);
                 }
             };
@@ -7823,11 +10480,15 @@ async function runSmartCascade(targetNode=null){
             await runSmartCascadeRoundsWithLimit(roundIndexes, parallelLimit, (loopIndex, roundOffset) => {
                 const outputTarget = parallelTargets[roundOffset] || null;
                 return runRound(loopIndex, {outputTarget});
-            });
+            }, runState);
         } else {
-            for(const loopIndex of roundIndexes) await runRound(loopIndex);
+            for(const loopIndex of roundIndexes){
+                throwIfSmartCascadeStopRequested(runState);
+                await runRound(loopIndex);
+            }
         }
-        smartLoopContext = null;
+        throwIfSmartCascadeStopRequested(runState);
+        if(parallelLimit === 1) smartLoopContext = null;
         selectedId = '';
         selectedIds = [];
         selectedImage = {nodeId:'', index:-1};
@@ -7841,18 +10502,18 @@ async function runSmartCascade(targetNode=null){
             ? trf(loopMode === 'parallel' ? 'smart.loopParallelRoundsDone' : 'smart.loopRunRoundsDone', {n:totalRounds})
             : tr('smart.loopRunDone'));
     } catch(e) {
-        smartLoopContext = null;
+        if(parallelLimit === 1) smartLoopContext = null;
         selectedId = originalSelected;
         settings = originalSettings;
         promptInput.innerHTML = originalPromptHtml;
-        toast((e.message || tr('smart.errRunFailed')).slice(0, 160));
+        toast(e?.smartCascadeStopped ? '已停止一键运行' : (e.message || tr('smart.errRunFailed')).slice(0, 160));
     } finally {
-        smartCascadeRunning = false;
-        smartCascadeActiveLoopId = '';
+        smartCascadeRuns.delete(runKey);
+        syncSmartCascadeLegacyState();
         smartCascadeSilentSelection = false;
-        smartCascadeRunPath = null;
-        runBtn.disabled = false;
+        runBtn.disabled = smartCascadeAnyRunning();
         cascadeRunBtn.disabled = false;
+        if(directLoopTargetRun) finishLoopTargetPreviewState(tail);
         scheduleSave();
         render();
     }
@@ -7880,7 +10541,7 @@ async function runGeneration(){
     const outpaintSize = node?.outpaintSize && Number(node.outpaintSize.width) > 0 && Number(node.outpaintSize.height) > 0
         ? {width:Math.round(Number(node.outpaintSize.width)), height:Math.round(Number(node.outpaintSize.height))}
         : null;
-    if(outpaintSize && settings.engine === 'api' && settings.apiKind !== 'video'){
+    if(outpaintSize && isApiLikeEngine(settings.engine) && settings.apiKind !== 'video'){
         settings = {
             ...settings,
             resolution:'custom',
@@ -7891,7 +10552,7 @@ async function runGeneration(){
         };
     }
     const meta = snapshotRunMeta(prompt, node.id, request.displayPrompt, refs);
-    const logKind = settings.engine === 'api' && settings.apiKind === 'video' ? 'video' : 'image';
+    const logKind = isApiLikeEngine(settings.engine) && settings.apiKind === 'video' ? 'video' : 'image';
     const runLog = smartRunSnapshot(node, prompt, refs, logKind);
     rememberRecentSmartSettings(settings, node);
     const runLogStart = nowMs();
@@ -7900,7 +10561,7 @@ async function runGeneration(){
         : settings.engine === 'comfy'
         ? (settings.comfyMode === 'text' || settings.comfyMode === 'enhance' || settings.comfyMode === 'edit' || settings.comfyMode === 'custom' ? 1 : 1)
         : Math.max(1, Math.min(8, Number(settings.count || 1)));
-    const apiConcurrentRun = settings.engine === 'api' || settings.engine === 'runninghub';
+    const apiConcurrentRun = isApiLikeEngine(settings.engine) || settings.engine === 'runninghub' || settings.engine === 'modelscope';
     const nodeHasImages = (node.images || []).some(img => img?.url);
     const workflowModeRun = smartImageUsesWorkflowInput(node, smartLoopContext);
     const sourceVisualState = nodeHasImages && !workflowModeRun ? {
@@ -7947,7 +10608,7 @@ async function runGeneration(){
             settings = previousSettings;
             return;
         }
-        if(settings.engine === 'api' && settings.apiKind === 'video'){
+        if(isApiLikeEngine(settings.engine) && settings.apiKind === 'video'){
             const outVideos = await runApiVideoGeneration(prompt, refs);
             if(!outVideos.length) throw new Error(tr('smart.errNoOutVideos'));
             finalizePendingNode(pendingNode, outVideos, pendingMeta, 'video');
@@ -7963,7 +10624,7 @@ async function runGeneration(){
             : settings.engine === 'modelscope'
                 ? await runModelscopeGeneration(prompt, refs)
                 : await runApiGeneration(prompt, refs);
-        if(settings.engine === 'api'){
+        if(isApiLikeEngine(settings.engine)){
             const taskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
             pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image'}));
@@ -7975,6 +10636,13 @@ async function runGeneration(){
             scheduleSave();
             await saveCanvas();
             await resumeSmartPendingNode(pendingNode);
+            if(pendingNode.jimengPending){
+                if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
+                clearPromptInput({preserveDraft:true});
+                settings = previousSettings;
+                scheduleSave();
+                return;
+            }
             if(!(pendingNode.images || []).length) throw new Error(tr('smart.errNoOutImages'));
             if(outpaintSize) delete node.outpaintSize;
             if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
@@ -7994,6 +10662,12 @@ async function runGeneration(){
         scheduleSave();
     } catch(e) {
         settings = previousSettings;
+        if(handleJimengPendingSignal(pendingNode, e)){
+            if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
+            delete pendingNode._runMetaTargetId;
+            clearPromptInput({preserveDraft:true});
+            return;
+        }
         pendingNode.pending = 0;
         if(branchNode){
             nodes = nodes.filter(n => n.id !== branchNode.id);
@@ -8068,30 +10742,30 @@ function comfyFieldKind(field){
     if(field?.type === 'textarea' || /prompt|text|提示词|正向|负向/.test(key)) return 'prompt';
     return 'setting';
 }
-async function runApiGeneration(prompt, refs){
-    if(!settings.provider_id || !settings.model) throw new Error(tr('smart.errNoApiModel'));
-    const count = Math.max(1, Math.min(8, Number(settings.count || 1)));
-    const payload = {prompt, provider_id:settings.provider_id, model:settings.model, size:sizeForRun(), quality:settings.quality || 'auto', n:1, reference_images:imageRefsOnly(refs)};
+async function runApiGeneration(prompt, refs, runSettings=settings){
+    if(!runSettings.provider_id || !runSettings.model) throw new Error(tr('smart.errNoApiModel'));
+    const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
+    const payload = {prompt, provider_id:runSettings.provider_id, model:runSettings.model, size:sizeForRun(runSettings), quality:runSettings.quality || 'auto', n:1, reference_images:imageRefsOnly(refs)};
     const tasks = await Promise.all(Array.from({length:count}, () => fetch('/api/canvas-image-tasks', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)}).then(async r => {
         if(!r.ok) throw new Error(await r.text());
         return r.json();
     })));
     return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count};
 }
-async function runRunningHubGeneration(prompt, refs){
-    const ref = selectedRunningHubRef();
+async function runRunningHubGeneration(prompt, refs, runSettings=settings){
+    const ref = selectedRunningHubRef(runSettings);
     if(!ref) throw new Error(tr('smart.rhNeedConfig'));
-    const fields = rhActiveFields();
+    const fields = rhActiveFields(runSettings);
     if(!fields.length) throw new Error(tr('smart.rhNeedFields'));
-    smartRhRandomValues = {};
+    const randomValues = {};
     const mode = ref.kind;
     const media = rhMediaForRun(prompt, refs);
-    const nodeInfoList = await rhBuildNodeInfoList(media);
-    const workflowExtras = mode === 'workflow' ? await rhBuildWorkflowRequestExtras(media, nodeInfoList) : {};
+    const nodeInfoList = await rhBuildNodeInfoList(media, runSettings, randomValues);
+    const workflowExtras = mode === 'workflow' ? await rhBuildWorkflowRequestExtras(media, nodeInfoList, runSettings) : {};
     const endpoint = mode === 'workflow' ? '/api/runninghub/workflow-submit' : '/api/runninghub/submit';
     const body = mode === 'workflow'
-        ? {workflowId:ref.id, nodeInfoList, useWallet:settings.rhPayment === 'wallet', ...workflowExtras}
-        : {webappId:ref.id, nodeInfoList, instanceType:settings.rhInstanceType || '', useWallet:settings.rhPayment === 'wallet'};
+        ? {workflowId:ref.id, nodeInfoList, useWallet:runSettings.rhPayment === 'wallet', ...workflowExtras}
+        : {webappId:ref.id, nodeInfoList, instanceType:runSettings.rhInstanceType || '', useWallet:runSettings.rhPayment === 'wallet'};
     const submit = await fetch(endpoint, {
         method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -8119,47 +10793,72 @@ async function runRunningHubGeneration(prompt, refs){
     }
     throw new Error(tr('smart.rhTimeout'));
 }
-async function runApiVideoGeneration(prompt, refs){
-    if(!settings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
-    const uploadedRefs = applyUploadedUrlsToSmartRefs(refs);
-    const refImages = imageRefsOnly(uploadedRefs).map((ref, i) => {
-        const item = {url:ref.url, name:ref.name || `图${i + 1}`};
-        if(settings.videoUseFrameRoles){
-            if(i === 0) item.role = 'first_frame';
-            else if(i === 1) item.role = 'last_frame';
-        }
-        return item;
-    });
-    const manualVideo = manualSmartVideoLink()?.url || '';
-    let refVideos = manualVideo ? [manualVideo] : videoRefsOnly(uploadedRefs).map(ref => ref.url);
-    const payload = {
-        prompt,
-        provider_id: settings.videoProvider || 'comfly',
-        model: settings.videoModel || 'veo3-fast',
-        duration: Math.max(1, Math.min(60, Number(settings.videoDuration) || 5)),
-        aspect_ratio: settings.videoAspect || '16:9',
-        resolution: settings.videoResolution || '',
-        images: refImages,
-        videos: refVideos,
-        enhance_prompt: Boolean(settings.videoEnhancePrompt),
-        enable_upsample: Boolean(settings.videoEnableUpsample),
-        watermark: Boolean(settings.videoWatermark),
-        camerafixed: Boolean(settings.videoCameraFixed),
-        generate_audio: Boolean(settings.videoGenerateAudio)
-    };
-    const result = await fetch('/api/canvas-video', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload)
-    }).then(async r => { if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed'))); return r.json(); });
-    return resultMediaUrls(result);
+async function runApiVideoGeneration(prompt, refs, runSettings=settings){
+    if(!runSettings.videoModel) throw new Error(tr('smart.errNoVideoModel'));
+    try {
+        const uploadedRefs = applyUploadedUrlsToSmartRefs(refs, runSettings);
+        const trustedMode = Boolean(runSettings.videoTrustedAsset);
+        const trustedSource = trustedMode ? (['library','cloud','manual'].includes(runSettings.videoTrustedSource) ? runSettings.videoTrustedSource : 'library') : 'none';
+        // 仅「素材库链接」来源才走 asset:// 认证地址 + 后端可信素材路由；上传云端/手动网址走普通直链。
+        const useAssetUris = trustedSource === 'library';
+        const targetPlatform = videoProviderPlatform(runSettings.videoProvider || 'comfly');
+        let mismatchedAsset = false;
+        const effUrl = ref => {
+            const uris = (ref && ref.asset_uris && typeof ref.asset_uris === 'object') ? ref.asset_uris : null;
+            if(useAssetUris && uris && Object.keys(uris).length){
+                // asset:// 与平台绑定：取当前视频平台对应的认证地址；该素材没注册到这个平台就回退本地 url
+                if(targetPlatform && uris[targetPlatform]) return uris[targetPlatform];
+                mismatchedAsset = true;
+            }
+            return ref?.url;
+        };
+        const refImages = imageRefsOnly(uploadedRefs).map((ref, i) => {
+            const item = {url:effUrl(ref), name:ref.name || `图${i + 1}`};
+            if(runSettings.videoUseFrameRoles){
+                if(i === 0) item.role = 'first_frame';
+                else if(i === 1) item.role = 'last_frame';
+            }
+            return item;
+        });
+        const manualVideo = manualSmartVideoLink(runSettings)?.url || '';
+        const refVideos = manualVideo ? manualSmartMediaLinks(runSettings).map(item => item.url).filter(Boolean) : videoRefsOnly(uploadedRefs).map(ref => effUrl(ref)).filter(Boolean);
+        const refAudios = audioRefsOnly(uploadedRefs).map(ref => effUrl(ref)).filter(Boolean).slice(0, 3);
+        if(mismatchedAsset) toast('部分认证素材属于其它平台，已回退为普通素材。切换到对应平台的视频接口才能用 asset:// 认证地址。');
+        const payload = {
+            prompt,
+            provider_id: runSettings.videoProvider || 'comfly',
+            model: runSettings.videoModel || 'veo3-fast',
+            duration: Math.max(1, Math.min(60, Number(runSettings.videoDuration) || 5)),
+            aspect_ratio: runSettings.videoAspect || '16:9',
+            resolution: runSettings.videoResolution || '',
+            images: refImages,
+            videos: refVideos,
+            audios: refAudios,
+            enhance_prompt: Boolean(runSettings.videoEnhancePrompt),
+            enable_upsample: Boolean(runSettings.videoEnableUpsample),
+            watermark: Boolean(runSettings.videoWatermark),
+            camerafixed: Boolean(runSettings.videoCameraFixed),
+            generate_audio: Boolean(runSettings.videoGenerateAudio),
+            multimodal: Boolean(runSettings.videoMultimodal),
+            trusted_asset: useAssetUris
+        };
+        const result = await fetch('/api/canvas-video', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(payload)
+        }).then(async r => { if(!r.ok) throw new Error(await smartResponseErrorMessage(r, tr('smart.errRunFailed'))); return r.json(); });
+        if(result && result.jimeng_pending) throw new JimengPendingSignal({submitId:result.submit_id, kind:result.kind || 'video', queueInfo:result.queue_info, message:result.message});
+        return resultMediaUrls(result);
+    } finally {
+        transientSmartCloudLinks = [];
+    }
 }
-async function runModelscopeGeneration(prompt, refs){
+async function runModelscopeGeneration(prompt, refs, runSettings=settings){
     refs = imageRefsOnly(refs);
-    const modelKey = settings.msgenModel || 'zimage';
+    const modelKey = runSettings.msgenModel || 'zimage';
     const msModel = MS_GEN_MODELS[modelKey] || MS_GEN_MODELS.zimage;
     if(msModel.supportsImage && !refs.length) throw new Error(tr('smart.errMsNeedRefs'));
-    const size = apiImageSize(settings.msRatio || 'square', settings.msResolution || '1k', settings.msCustomRatio || '', settings.msCustomSize || '');
+    const size = apiImageSize(runSettings.msRatio || 'square', runSettings.msResolution || '1k', runSettings.msCustomRatio || '', runSettings.msCustomSize || '');
     const parsed = parseSizeValue(size);
     const width = Number(parsed?.width) || 1024;
     const height = Number(parsed?.height) || 1024;
@@ -8169,12 +10868,12 @@ async function runModelscopeGeneration(prompt, refs){
             if(ref.url) imageUrls.push(await urlToBase64(ref.url).catch(() => ref.url));
         }
     }
-    const count = Math.max(1, Math.min(8, Number(settings.count || 1)));
+    const count = Math.max(1, Math.min(8, Number(runSettings.count || 1)));
     const submit = async () => {
         let body;
         if(modelKey === 'zimage') body = {prompt, resolution:`${width}x${height}`};
         else if(modelKey === 'qwen_edit') body = {prompt, image_urls:imageUrls, resolution:`${width}x${height}`};
-        else body = {prompt, model:modelKey === 'custom' ? (settings.msCustomModel || modelscopeImageModels()[0]) : msModel.modelId, image_urls:imageUrls, width, height, size:`${width}x${height}`};
+        else body = {prompt, model:modelKey === 'custom' ? (runSettings.msCustomModel || modelscopeImageModels()[0]) : msModel.modelId, image_urls:imageUrls, width, height, size:`${width}x${height}`};
         const data = await fetch(msModel.endpoint, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}).then(async r => {
             if(!r.ok) throw new Error(await r.text());
             return r.json();
@@ -8334,6 +11033,158 @@ function smartPendingTasks(node){
     if(!node || !Array.isArray(node.pendingTasks)) return [];
     return node.pendingTasks.filter(task => task && task.taskId);
 }
+class JimengPendingSignal extends Error {
+    constructor(info){
+        const data = info || {};
+        super(data.message || '即梦任务排队中，可继续等待或手动查询');
+        this.jimengPending = true;
+        this.submitId = data.submitId || data.submit_id || '';
+        this.kind = data.kind || 'image';
+        this.queueInfo = data.queueInfo || data.queue_info || {};
+    }
+}
+const activeJimengPolls = new Set();
+const JIMENG_POLL_INTERVAL = 60000;
+const JIMENG_POLL_MAX = 1440;
+function jimengQueueText(queueInfo){
+    const qi = queueInfo || {};
+    const idx = qi.queue_idx;
+    const len = qi.queue_length;
+    if(idx != null && len != null) return `即梦云端排队中（第 ${idx}/${len} 位）`;
+    return '即梦云端生成中';
+}
+function setNodeJimengPending(node, signal){
+    if(!node || !signal || !signal.submitId) return;
+    const prev = node.jimengPending && node.jimengPending.submitId === signal.submitId ? node.jimengPending : null;
+    node.jimengPending = {
+        submitId:signal.submitId,
+        kind:signal.kind || (prev && prev.kind) || 'image',
+        queueInfo:signal.queueInfo || (prev && prev.queueInfo) || {},
+        message:signal.message || (prev && prev.message) || '',
+        startedAt:(prev && prev.startedAt) || nowMs(),
+        updatedAt:nowMs(),
+        querying:prev ? prev.querying : false
+    };
+    node.running = false;
+    node.pending = 0;
+    delete node.pendingTasks;
+    if(!node.runStartedAt) node.runStartedAt = node.jimengPending.startedAt;
+    delete node.runFinishedAt;
+    delete node.runElapsedMs;
+    node.runTimerHidden = false;
+    render();
+    scheduleSave();
+    startJimengPoll(node);
+}
+function handleJimengPendingSignal(node, e){
+    if(!(e && e.jimengPending && e.submitId)) return false;
+    setNodeJimengPending(node, e);
+    toast((e.message || jimengQueueText(e.queueInfo)).slice(0, 160));
+    return true;
+}
+function finalizeJimengPending(node, urls, kind='image'){
+    if(!node) return false;
+    const ext = kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : kind === 'text' ? 'txt' : 'png';
+    const additions = (urls || []).map((item, i) => {
+        const url = typeof item === 'string' ? item : item?.url || '';
+        const itemKind = (typeof item === 'object' && item.kind) || kind;
+        return stripImageGenerationMeta({url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:itemKind, generatedResult:true});
+    }).filter(item => item.url);
+    if(!additions.length) return false;
+    delete node.jimengPending;
+    replaceOutputsToNodeWithHistory(node, additions, kind, null, {skipShift:true});
+    node.running = false;
+    node.pending = 0;
+    node.runFinishedAt = nowMs();
+    if(!node.runStartedAt) node.runStartedAt = node.runFinishedAt;
+    node.runElapsedMs = Math.max(0, node.runFinishedAt - Number(node.runStartedAt || node.runFinishedAt));
+    node.runTimerHidden = false;
+    render();
+    scheduleSave();
+    return true;
+}
+function applyJimengQueryResult(node, data){
+    if(!node || !data) return false;
+    if(data.status === 'succeeded'){
+        const kind = data.kind || node.jimengPending?.kind || 'image';
+        return finalizeJimengPending(node, data.urls || [], kind);
+    }
+    if(data.status === 'failed'){
+        delete node.jimengPending;
+        node.running = false;
+        node.pending = 0;
+        toast((data.error || '即梦任务失败').slice(0, 160));
+        render();
+        scheduleSave();
+        return true;
+    }
+    if(node.jimengPending){
+        node.jimengPending.queueInfo = data.queue_info || node.jimengPending.queueInfo || {};
+        node.jimengPending.message = data.message || node.jimengPending.message || '';
+        node.jimengPending.updatedAt = nowMs();
+    }
+    render();
+    scheduleSave();
+    return false;
+}
+async function fetchJimengQuery(submitId, kind){
+    return fetch('/api/jimeng/query-media', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({submit_id:submitId, kind:kind || 'image'})
+    }).then(async r => { if(!r.ok) throw new Error(await r.text()); return r.json(); });
+}
+async function queryJimengNow(nodeId){
+    const node = nodes.find(n => n.id === nodeId);
+    if(!node || !node.jimengPending || !node.jimengPending.submitId) return;
+    if(node.jimengPending.querying) return;
+    const submitId = node.jimengPending.submitId;
+    const kind = node.jimengPending.kind || 'image';
+    node.jimengPending.querying = true;
+    render();
+    try {
+        const data = await fetchJimengQuery(submitId, kind);
+        applyJimengQueryResult(node, data);
+    } catch(e){
+        toast((e.message || '查询失败').slice(0, 160));
+    } finally {
+        if(node.jimengPending) node.jimengPending.querying = false;
+        render();
+    }
+}
+function startJimengPoll(node){
+    if(!node || !node.jimengPending || !node.jimengPending.submitId) return;
+    const submitId = node.jimengPending.submitId;
+    if(activeJimengPolls.has(submitId)) return;
+    activeJimengPolls.add(submitId);
+    const nodeId = node.id;
+    (async () => {
+        try {
+            for(let i = 0; i < JIMENG_POLL_MAX; i++){
+                await new Promise(resolve => setTimeout(resolve, JIMENG_POLL_INTERVAL));
+                const cur = nodes.find(n => n.id === nodeId);
+                if(!cur || !cur.jimengPending || cur.jimengPending.submitId !== submitId) return;
+                if(cur.jimengPending.querying) continue;
+                let data;
+                try {
+                    data = await fetchJimengQuery(submitId, cur.jimengPending.kind || 'image');
+                } catch(err){ continue; }
+                const done = applyJimengQueryResult(cur, data);
+                if(done) return;
+                const after = nodes.find(n => n.id === nodeId);
+                if(!after || !after.jimengPending || after.jimengPending.submitId !== submitId) return;
+            }
+        } finally {
+            activeJimengPolls.delete(submitId);
+        }
+    })();
+}
+function resumeJimengPendingNodes(){
+    nodes.filter(n => n && n.jimengPending && n.jimengPending.submitId).forEach(n => {
+        n.jimengPending.querying = false;
+        startJimengPoll(n);
+    });
+}
 async function pollSmartCanvasTask(taskId){
     if(!taskId) throw new Error(tr('smart.errRunFailed'));
     if(activeSmartTaskPolls.has(taskId)) return activeSmartTaskPolls.get(taskId);
@@ -8345,6 +11196,7 @@ async function pollSmartCanvasTask(taskId){
                 return r.json();
             });
             if(task.status === 'succeeded') return task.result || {};
+            if(task.status === 'jimeng_pending') throw new JimengPendingSignal({submitId:task.submit_id, kind:task.kind, queueInfo:task.queue_info, message:task.message});
             if(task.status === 'failed') throw new Error(task.error || tr('smart.errRunFailed'));
         }
         throw new Error(tr('smart.errRunTimeout'));
@@ -8387,6 +11239,7 @@ async function resumeSmartPendingNode(node){
     node.pending = Math.max(tasks.length, Number(node.pending || 0) || tasks.length);
     node.running = false;
     render();
+    const failures = [];
     await Promise.all(tasks.map(async task => {
         try {
             const result = await pollSmartCanvasTask(task.taskId);
@@ -8394,6 +11247,13 @@ async function resumeSmartPendingNode(node){
             render();
             scheduleSave();
         } catch(e) {
+            if(e && e.jimengPending && e.submitId){
+                node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
+                setNodeJimengPending(node, e);
+                render();
+                scheduleSave();
+                return;
+            }
             node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
             node.pending = Math.max(0, Number(node.pending || 0) - 1);
             if(!node.pending && smartPendingTasks(node).length === 0){
@@ -8404,11 +11264,15 @@ async function resumeSmartPendingNode(node){
                     delete node.h;
                 }
             }
+            failures.push(e);
             toast((e.message || tr('smart.errRunFailed')).slice(0, 160));
             render();
             scheduleSave();
         }
     }));
+    if(failures.length && !(node.images || []).length){
+        throw failures[0];
+    }
 }
 function resumeSmartPendingTasks(){
     nodes.filter(node => smartPendingTasks(node).length).forEach(node => {
@@ -8572,13 +11436,22 @@ shell.addEventListener('click', e => {
     if(e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
     e.preventDefault();
     e.stopPropagation();
-    exitZoomPreview(screenToWorld(e));
+    const nodeEl = e.target.closest('.image-node');
+    if(nodeEl?.dataset?.id) exitZoomPreviewToNode(nodeEl.dataset.id);
+    else exitZoomPreview(screenToWorld(e));
 }, true);
 shell.onmousedown = e => {
     if(zoomPreviewState && e.button === 0 && !e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
     if(e.target.closest('.image-node,.composer,.smart-back,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal,.create-menu,.smart-minimap')) return;
     closeCreateMenu();
-    if(e.button === 0 && e.ctrlKey){
+    if(e.button === 0 && isRKeyDown){
+        e.preventDefault();
+        didPan = false;
+        selectionState = {startScreen:{x:e.clientX, y:e.clientY}, startWorld:screenToWorld(e)};
+        updateSelectionBox(e);
+        return;
+    }
+    if(e.button === 0 && (e.ctrlKey || e.metaKey)){
         e.preventDefault();
         didPan = false;
         selectionState = {startScreen:{x:e.clientX, y:e.clientY}, startWorld:screenToWorld(e)};
@@ -8590,6 +11463,13 @@ shell.onmousedown = e => {
     didPan = false;
     panState = {button:e.button, startX:e.clientX, startY:e.clientY, ox:viewport.x, oy:viewport.y};
     shell.classList.add('panning');
+};
+shell.oncontextmenu = e => {
+    if((e.ctrlKey || e.metaKey) || isRKeyDown){
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+    }
 };
 shell.ondblclick = e => {
     if(didPan || e.target.closest('.image-node,.composer,.smart-back,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu')) return;
@@ -8660,6 +11540,15 @@ window.onmousemove = e => {
     if(previewCompareDrag){
         e.preventDefault();
         setPreviewComparePos(e.clientX);
+        return;
+    }
+    if(panoramaState.drag){
+        e.preventDefault();
+        const dx = e.clientX - panoramaState.drag.clientX;
+        const dy = e.clientY - panoramaState.drag.clientY;
+        panoramaState.yaw = panoramaState.drag.yaw - dx * 0.18;
+        panoramaState.pitch = Math.max(-85, Math.min(85, panoramaState.drag.pitch + dy * 0.18));
+        document.getElementById('previewStage')?.classList.add('panning');
         return;
     }
     if(previewPanDrag){
@@ -8765,7 +11654,7 @@ window.onmousemove = e => {
     });
     if(assetLibraryOpen){
         const hit = document.elementFromPoint(e.clientX, e.clientY);
-        if(hit && assetPanel.contains(hit)){
+        if(hit && assetPanel?.contains(hit)){
             setAssetDragOver(true);
             clearDropHighlight();
             setAssetDragOver(true);
@@ -8798,6 +11687,10 @@ window.onmouseup = e => {
     if(promptResizeState){ promptResizeState = null; scheduleSave(); }
     if(selectionState) finishSelection(e);
     if(previewCompareDrag) previewCompareDrag = false;
+    if(panoramaState.drag){
+        panoramaState.drag = null;
+        document.getElementById('previewStage')?.classList.remove('panning');
+    }
     if(previewPanDrag){
         previewPanDrag = null;
         document.getElementById('previewStage')?.classList.remove('panning');
@@ -8835,7 +11728,7 @@ window.onmouseup = e => {
         const draggedNode = nodes.find(n => n.id === dragState.id);
         let stateChanged = false;
         const hit = document.elementFromPoint(e.clientX, e.clientY);
-        const droppedOnAssetPanel = assetLibraryOpen && hit && assetPanel.contains(hit);
+        const droppedOnAssetPanel = assetLibraryOpen && hit && assetPanel?.contains(hit);
         if(droppedOnAssetPanel && draggedNode && (draggedNode.images || []).length){
             const imagesToSave = (draggedNode.images || []).filter(img => img?.url);
             imagesToSave.forEach(img => addUrlToAssetLibrary(img.url, img.name || draggedNode.title || 'image'));
@@ -8933,7 +11826,10 @@ shell.ondrop = async e => {
     if(assetRaw){
         try {
             const asset = JSON.parse(assetRaw);
-            if(asset?.url) createImageNodeAt(p, [{url:asset.url, name:asset.name || 'asset', kind:asset.kind || assetMediaKind(asset)}]);
+            if(asset?.url) {
+                pushUndo();
+                createImageNodeAt(p, [{url:asset.url, name:asset.name || 'asset', kind:asset.kind || assetMediaKind(asset)}], {skipUndo:true});
+            }
             return;
         } catch {}
     }
@@ -8955,10 +11851,13 @@ window.addEventListener('paste', e => {
 });
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
+    if(key === 'r' && !isEditableTarget(e.target)) isRKeyDown = true;
     if(imageEditModal.classList.contains('open') && !isEditableTarget(e.target)){
         if(e.key === 'ArrowLeft' || e.key === 'ArrowRight'){
             e.preventDefault();
-            navigatePreviewImage(e.key === 'ArrowLeft' ? -1 : 1);
+            if(!seekPreviewVideoFrames(e.key === 'ArrowLeft' ? -1 : 1)){
+                navigatePreviewImage(e.key === 'ArrowLeft' ? -1 : 1);
+            }
             return;
         }
     }
@@ -9008,16 +11907,22 @@ window.addEventListener('keydown', e => {
         render();
         scheduleSave();
     }
-    if(e.ctrlKey && e.shiftKey && key === 'g' && !isEditableTarget(e.target)){
+    if((e.ctrlKey || e.metaKey) && e.shiftKey && key === 'g' && !isEditableTarget(e.target)){
         e.preventDefault();
         const ids = selectedIds.length ? selectedIds.slice() : (selectedId ? [selectedId] : []);
         const ok = ids.map(id => ungroupNode(id)).some(Boolean);
         if(ok) return;
     }
-    if(e.ctrlKey && String(e.key).toLowerCase() === 'g' && !e.shiftKey && !isEditableTarget(e.target)){
+    if((e.ctrlKey || e.metaKey) && key === 'g' && !e.shiftKey && !isEditableTarget(e.target)){
         e.preventDefault();
         groupSelectedNodes();
     }
+});
+window.addEventListener('keyup', e => {
+    if(String(e.key || '').toLowerCase() === 'r') isRKeyDown = false;
+});
+window.addEventListener('blur', () => {
+    isRKeyDown = false;
 });
 engineSelect.onchange = () => {
     settings.engine = engineSelect.value;
@@ -9029,7 +11934,7 @@ engineSelect.onchange = () => {
 };
 function syncApiKindToggleVisibility(){
     if(!apiKindToggle) return;
-    apiKindToggle.style.display = settings.engine === 'api' ? 'inline-flex' : 'none';
+    apiKindToggle.style.display = isApiLikeEngine(settings.engine) ? 'inline-flex' : 'none';
     apiKindToggle.querySelectorAll('[data-kind]').forEach(btn => btn.classList.toggle('active', btn.dataset.kind === (settings.apiKind || 'image')));
 }
 if(apiKindToggle){
@@ -9061,7 +11966,15 @@ if(promptResize){
     });
 }
 runBtn.onclick = runGeneration;
-cascadeRunBtn.onclick = runSmartCascade;
+cascadeRunBtn.onclick = () => {
+    const node = selectedNode();
+    const loopId = resolveSmartCascadeLoop(node?.id)?.node?.id || '';
+    if(loopId && smartCascadeIsLoopRunning(loopId)) {
+        requestSmartCascadeStop(loopId);
+        return;
+    }
+    runSmartCascade();
+};
 fileInput.onchange = () => {
     const groupPoint = pendingGroupUploadPoint;
     if(!fileInput.files?.length){
@@ -9075,19 +11988,91 @@ fileInput.onchange = () => {
     uploadTargetId = '';
     fileInput.value = '';
 };
-assetToggle.onclick = () => toggleAssetLibrary();
-assetCloseBtn.onclick = () => toggleAssetLibrary(false);
-assetPanel.addEventListener('pointerdown', e => e.stopPropagation());
-assetPanel.addEventListener('mousedown', e => e.stopPropagation());
-assetPanel.addEventListener('click', e => e.stopPropagation());
-assetPanel.addEventListener('wheel', e => e.stopPropagation(), {passive:false});
-assetDialogBackdrop.addEventListener('pointerdown', e => e.stopPropagation());
-assetDialogBackdrop.addEventListener('mousedown', e => e.stopPropagation());
-assetDialogBackdrop.addEventListener('click', e => e.stopPropagation());
+if(assetToggle) assetToggle.onclick = () => toggleAssetLibrary();
+if(assetCloseBtn) assetCloseBtn.onclick = () => toggleAssetLibrary(false);
+assetPanel?.addEventListener('pointerdown', e => e.stopPropagation());
+assetPanel?.addEventListener('mousedown', e => e.stopPropagation());
+assetPanel?.addEventListener('click', e => e.stopPropagation());
+assetPanel?.addEventListener('wheel', e => {
+    e.stopPropagation();
+    const scroller = e.target.closest?.('.asset-grid') || assetGrid;
+    if(!scroller || getComputedStyle(scroller).display === 'none') return;
+    const canScroll = scroller.scrollHeight > scroller.clientHeight || scroller.scrollWidth > scroller.clientWidth;
+    if(!canScroll) return;
+    e.preventDefault();
+    scroller.scrollTop += e.deltaY;
+    scroller.scrollLeft += e.deltaX;
+}, {passive:false, capture:true});
+assetDialogBackdrop?.addEventListener('pointerdown', e => e.stopPropagation());
+assetDialogBackdrop?.addEventListener('mousedown', e => e.stopPropagation());
+assetDialogBackdrop?.addEventListener('click', e => e.stopPropagation());
 promptPresetPanel?.addEventListener('pointerdown', e => e.stopPropagation());
 promptPresetPanel?.addEventListener('mousedown', e => e.stopPropagation());
 promptPresetPanel?.addEventListener('click', e => e.stopPropagation());
+promptTemplatePanel?.addEventListener('pointerdown', e => e.stopPropagation());
+promptTemplatePanel?.addEventListener('mousedown', e => e.stopPropagation());
+promptTemplatePanel?.addEventListener('wheel', e => e.stopPropagation(), {passive:false});
+promptTemplatePanel?.addEventListener('click', e => {
+    e.stopPropagation();
+    const apply = e.target.closest('[data-template-apply]');
+    if(apply){ applyPromptTemplateToNode(apply.dataset.templateApply || 'positive'); return; }
+    if(e.target.closest('[data-template-save-current]')){ saveCurrentPromptAsTemplate(); return; }
+    if(e.target.closest('[data-template-new]')){ createBlankPromptTemplate(); return; }
+    if(e.target.closest('[data-template-edit]')) { promptTemplateEditing = true; renderPromptTemplatePanel(); return; }
+    if(e.target.closest('[data-template-edit-cancel]')) { promptTemplateEditing = false; renderPromptTemplatePanel(); return; }
+    if(e.target.closest('[data-template-edit-save]')){ savePromptTemplateEdit(); return; }
+    if(e.target.closest('[data-template-delete]')){ deletePromptTemplate(); return; }
+    const cat = e.target.closest('[data-template-cat]');
+    if(cat){
+        promptTemplateCategory = cat.dataset.templateCat || 'all';
+        promptTemplateSelectedId = '';
+        promptTemplateEditing = false;
+        renderPromptTemplatePanel({preserveScroll:false});
+        return;
+    }
+    const catEdit = e.target.closest('[data-template-cat-edit]');
+    if(catEdit){
+        const id = catEdit.dataset.templateCatEdit || '';
+        renamePromptTemplateGroup(id);
+        return;
+    }
+    const catDelete = e.target.closest('[data-template-cat-delete]');
+    if(catDelete){
+        deletePromptTemplateGroup(catDelete.dataset.templateCatDelete || '');
+        return;
+    }
+    if(e.target.closest('[data-template-group-edit]')){
+        promptTemplateGroupEditMode = !promptTemplateGroupEditMode;
+        renderPromptTemplatePanel({preserveScroll:false});
+        return;
+    }
+    if(e.target.closest('[data-template-cat-new]')) { createPromptTemplateGroup(); return; }
+    const card = e.target.closest('[data-template-id]');
+    if(card){
+        promptTemplateSelectedId = card.dataset.templateId || '';
+        promptTemplateEditing = false;
+        renderPromptTemplatePanel();
+        return;
+    }
+});
 if(promptPresetClose) promptPresetClose.onclick = closePromptPresetPanel;
+if(promptTemplateClose) promptTemplateClose.onclick = closePromptTemplatePanel;
+if(promptTemplateSearch) promptTemplateSearch.oninput = () => renderPromptTemplatePanel({preserveScroll:false});
+if(promptTemplateLibrarySelect) promptTemplateLibrarySelect.onchange = () => {
+    activePromptLibraryId = promptTemplateLibrarySelect.value || 'system';
+    promptTemplateSelectedId = '';
+    promptTemplateEditing = false;
+    renderPromptTemplatePanel({preserveScroll:false});
+};
+if(composerTemplateBtn) composerTemplateBtn.onclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if(promptTemplatePanel?.classList?.contains('open') && promptTemplatePanel.dataset.target === 'composer'){
+        closePromptTemplatePanel();
+        return;
+    }
+    openPromptTemplatePanel(activeComposerNode()?.id || selectedNode()?.id || '', promptTemplateSelectedId, {target:'composer'});
+};
 if(promptPresetSelect) promptPresetSelect.onchange = () => renderPromptPresetPanel(promptPresetSelect.value);
 [promptPresetName, promptPresetText].forEach(input => {
     input?.addEventListener('input', () => {
@@ -9151,15 +12136,23 @@ if(promptPresetDelete) promptPresetDelete.onclick = () => {
 document.querySelectorAll('[data-asset-tab]').forEach(btn => {
     btn.onclick = () => { assetTab = btn.dataset.assetTab; renderAssetLibrary(); };
 });
-assetCategorySelect.onchange = () => { activeAssetCategoryId = assetCategorySelect.value; renderAssetLibrary(); };
-document.getElementById('assetAddCategoryBtn').onclick = async () => {
+if(assetLibrarySelect) assetLibrarySelect.onchange = () => {
+    activeAssetLibraryId = assetLibrarySelect.value || '';
+    activeAssetCategoryId = '';
+    mentionAssetCategoryId = '';
+    renderAssetLibrary();
+};
+if(assetCategorySelect) assetCategorySelect.onchange = () => { activeAssetCategoryId = assetCategorySelect.value; renderAssetLibrary(); };
+const assetAddCategoryBtn = document.getElementById('assetAddCategoryBtn');
+if(assetAddCategoryBtn) assetAddCategoryBtn.onclick = async () => {
     const name = await openAssetNameDialog({title:tr('smart.assetNewFolder'), value:tr('smart.assetFolder'), placeholder:tr('smart.assetFolder')});
     if(!name) return;
-    const data = await fetch('/api/asset-library/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, type:'image'})}).then(r => r.json());
+    const data = await fetch('/api/asset-library/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeAssetLibraryId, name, type:'image'})}).then(r => r.json());
     activeAssetCategoryId = data.category?.id || activeAssetCategoryId;
     setAssetLibraryFromResponse(data);
 };
-document.getElementById('assetRenameCategoryBtn').onclick = async () => {
+const assetRenameCategoryBtn = document.getElementById('assetRenameCategoryBtn');
+if(assetRenameCategoryBtn) assetRenameCategoryBtn.onclick = async () => {
     const cat = activeAssetCategory();
     if(!cat) return;
     const name = await openAssetNameDialog({title:tr('smart.assetRenameFolder'), value:cat.name || '', placeholder:tr('smart.assetFolder')});
@@ -9171,6 +12164,7 @@ function hasCanvasImageDrag(event){
     return Array.from(event.dataTransfer?.types || []).includes('application/x-smart-canvas-image');
 }
 function setAssetDragOver(active){
+    if(!assetDropZone || !assetPanel) return;
     assetDropZone.classList.toggle('drag-over', !!active);
     assetPanel.classList.toggle('drag-over', !!active);
 }
@@ -9213,18 +12207,18 @@ async function handleAssetPanelDrop(e){
         toast(err.message || tr('smart.assetAddFail'));
     }
 }
-assetDropZone.addEventListener('dragover', e => {
+assetDropZone?.addEventListener('dragover', e => {
     if(hasCanvasImageDrag(e) || hasSmartImageDropData(e.dataTransfer)){
         e.preventDefault();
         e.stopPropagation();
-        assetDropZone.classList.add('drag-over');
+        assetDropZone?.classList.add('drag-over');
     }
 });
-assetDropZone.addEventListener('dragleave', () => assetDropZone.classList.remove('drag-over'));
-assetDropZone.addEventListener('drop', handleAssetPanelDrop);
-assetPanel.addEventListener('dragover', handleAssetPanelDragOver);
-assetPanel.addEventListener('dragleave', e => { if(!assetPanel.contains(e.relatedTarget)) setAssetDragOver(false); });
-assetPanel.addEventListener('drop', handleAssetPanelDrop);
+assetDropZone?.addEventListener('dragleave', () => assetDropZone?.classList.remove('drag-over'));
+assetDropZone?.addEventListener('drop', handleAssetPanelDrop);
+assetPanel?.addEventListener('dragover', handleAssetPanelDragOver);
+assetPanel?.addEventListener('dragleave', e => { if(!assetPanel?.contains(e.relatedTarget)) setAssetDragOver(false); });
+assetPanel?.addEventListener('drop', handleAssetPanelDrop);
 createMenu?.addEventListener('mousedown', event => event.stopPropagation());
 createMenu?.addEventListener('click', event => {
     event.stopPropagation();
@@ -9295,9 +12289,10 @@ document.addEventListener('click', event => {
     if(!event.target.closest('.smart-control')) closeAllSmartPopovers();
     if(!event.target.closest('.mention-picker') && !event.target.closest('#promptInput')) closeMentionPicker();
     if(!event.target.closest('.prompt-preset-panel') && !event.target.closest('.prompt-preset-edit') && !event.target.closest('.prompt-preset-save')) closePromptPresetPanel();
+    if(!event.target.closest('.prompt-template-panel') && !event.target.closest('.prompt-preset-edit') && !event.target.closest('#composerTemplateBtn')) closePromptTemplatePanel();
 });
 document.addEventListener('keydown', event => {
-    if(event.key === 'Escape') { closeAllSmartPopovers(); closeCreateMenu(); closeSmartCanvasLog(); closeSmartCanvasShortcuts(); closePromptPresetPanel(); }
+    if(event.key === 'Escape') { closeAllSmartPopovers(); closeCreateMenu(); closeSmartCanvasLog(); closeSmartCanvasShortcuts(); closePromptPresetPanel(); closePromptTemplatePanel(); }
 });
 document.getElementById('cropBox').addEventListener('mousedown', event => beginCropDrag(event, 'move'));
 document.getElementById('cropHandle').addEventListener('mousedown', event => beginCropDrag(event, 'resize'));
@@ -9326,7 +12321,7 @@ imageEditModal.addEventListener('mousedown', event => {
     event.stopPropagation();
 });
 imageEditModal.addEventListener('mousemove', event => {
-    if(previewPanDrag || previewCompareDrag || imageEditPanDrag || cropDrag) return;
+    if(previewPanDrag || previewCompareDrag || panoramaState.drag || imageEditPanDrag || cropDrag) return;
     event.stopPropagation();
 });
 imageEditModal.addEventListener('click', event => {
@@ -9340,14 +12335,25 @@ document.getElementById('previewStage').addEventListener('mousedown', event => {
     if(imageEditMode !== 'preview' || event.button !== 0) return;
     if(event.target.closest('.preview-tools-overlay, .preview-download-overlay')) return;
     if(event.target.closest('.preview-compare-handle')) return;
+    if(event.target.closest('video')) return;
     event.preventDefault();
     event.stopPropagation();
+    if(panoramaState.enabled){
+        panoramaState.drag = {
+            clientX:event.clientX,
+            clientY:event.clientY,
+            yaw:panoramaState.yaw,
+            pitch:panoramaState.pitch
+        };
+        document.getElementById('previewStage')?.classList.add('panning');
+        return;
+    }
     previewPanDrag = {clientX:event.clientX, clientY:event.clientY, startX:previewPan.x, startY:previewPan.y};
 });
 document.getElementById('imageEditStage').addEventListener('mousedown', event => {
     if(imageEditMode === 'preview' || event.button !== 0) return;
     if(event.target.closest('.image-edit-actions, .preview-tools-overlay, .preview-download-overlay, .crop-box, .crop-handle')) return;
-    if(event.target.closest('#editDrawCanvas') && imageEditMode !== 'crop') return;
+    if(event.target.closest('#editDrawCanvas, #editTextCanvas, .edit-text-inline') && imageEditMode !== 'crop') return;
     const stage = event.currentTarget;
     if(stage.scrollWidth <= stage.clientWidth && stage.scrollHeight <= stage.clientHeight) return;
     event.preventDefault();
@@ -9399,10 +12405,46 @@ document.getElementById('editDrawCanvas').addEventListener('pointermove', moveEd
 document.getElementById('editDrawCanvas').addEventListener('pointerup', endEditDraw);
 document.getElementById('editDrawCanvas').addEventListener('pointercancel', endEditDraw);
 document.getElementById('editDrawCanvas').addEventListener('pointerleave', endEditDraw);
+document.getElementById('editTextCanvas')?.addEventListener('pointerdown', beginEditText);
+document.getElementById('editTextCanvas')?.addEventListener('pointermove', moveEditText);
+document.getElementById('editTextCanvas')?.addEventListener('pointerup', endEditText);
+document.getElementById('editTextCanvas')?.addEventListener('pointercancel', endEditText);
+document.getElementById('editTextCanvas')?.addEventListener('pointerleave', endEditText);
+document.getElementById('editTextCanvas')?.addEventListener('dblclick', event => {
+    if(imageEditMode !== 'brush' || brushTool !== 'text') return;
+    event.preventDefault(); event.stopPropagation();
+    const hit = hitEditTextItem(editTextPoint(event));
+    if(hit){
+        setSelectedEditTextItem(hit.id);
+        beginEditTextInline(hit);
+    }
+});
+['paintBrushSize','paintBrushColor'].forEach(id => {
+    const control = document.getElementById(id);
+    if(!control) return;
+    control.addEventListener('input', syncSelectedEditTextStyleFromBrush);
+    control.addEventListener('change', () => { editTextDirty = false; });
+});
 ['gridHorizontalLines','gridVerticalLines','gridGapSize'].forEach(id => {
     document.getElementById(id).addEventListener('input', () => {
         syncGridGapValue();
         refreshGridSplitPreview();
+    });
+});
+document.querySelectorAll('[data-panorama-ratio]').forEach(btn => {
+    btn.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        applyPanoramaRatio(btn.dataset.panoramaRatio || 'wide');
+    });
+});
+['panoramaRatioW','panoramaRatioH'].forEach(id => {
+    document.getElementById(id)?.addEventListener('input', () => {
+        panoramaState.ratio = 'custom';
+        panoramaState.customW = Math.max(1, Math.min(999, Number(document.getElementById('panoramaRatioW')?.value || 16)));
+        panoramaState.customH = Math.max(1, Math.min(999, Number(document.getElementById('panoramaRatioH')?.value || 9)));
+        refreshPanoramaControls();
+        resizePanoramaViewer();
     });
 });
 document.getElementById('imageEditStage').addEventListener('wheel', event => {
@@ -9410,6 +12452,13 @@ document.getElementById('imageEditStage').addEventListener('wheel', event => {
     event.preventDefault();
     event.stopPropagation();
     if(imageEditMode === 'preview'){
+        if(seekPreviewVideoFrames(event.deltaY > 0 ? 1 : -1)) return;
+        if(panoramaState.enabled){
+            const factor = event.deltaY < 0 ? 0.92 : 1 / 0.92;
+            panoramaState.fov = Math.max(35, Math.min(100, panoramaState.fov * factor));
+            updateZoomLabel();
+            return;
+        }
         const oldZoom = previewZoom;
         const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
         previewZoom = Math.max(0.05, previewZoom * factor);
@@ -9439,7 +12488,10 @@ document.getElementById('imageEditStage').addEventListener('wheel', event => {
     stage.scrollLeft = contentX * scale - mx;
     stage.scrollTop = contentY * scale - my;
 }, {passive:false});
-window.addEventListener('resize', () => { if(cropState) syncImageEditOverflow(); });
+window.addEventListener('resize', () => {
+    if(cropState) syncImageEditOverflow();
+    if(panoramaState.enabled) resizePanoramaViewer();
+});
 window.addEventListener('studio-theme-change', event => applyTheme(event.detail?.theme || 'light'));
 try {
     const apiChannel = new BroadcastChannel('studio-api');
@@ -9447,14 +12499,19 @@ try {
         if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed' || event.data?.type === 'comfy-instances-changed'){
             await refreshSmartConfigFromSettings();
         }
+        if(event.data?.type === 'asset_library_updated') handleAssetLibraryUpdatedMessage(event.data);
+        if(event.data?.type === 'canvas_updated') handleCanvasUpdatedMessage(event.data);
     };
 } catch(e) {}
 window.addEventListener('focus', () => {
     if(Date.now() - lastConfigRefreshAt > 1200) refreshSmartConfigFromSettings();
 });
 window.addEventListener('message', event => {
+    if(event.origin && event.origin !== location.origin) return;
     if(event.data?.type === 'studio-theme') applyTheme(event.data.theme || 'light');
     if(event.data?.type === 'providers-changed' || event.data?.type === 'workflows-changed' || event.data?.type === 'comfy-instances-changed') refreshSmartConfigFromSettings();
+    if(event.data?.type === 'asset_library_updated') handleAssetLibraryUpdatedMessage(event.data);
+    if(event.data?.type === 'canvas_updated') handleCanvasUpdatedMessage(event.data);
     if(event.data?.type === 'studio-lang' && window.StudioI18n) {
         window.StudioI18n.set(event.data.lang || 'zh');
     }
@@ -9466,13 +12523,18 @@ window.addEventListener('studio-lang-change', () => {
     if(document.getElementById('imageEditModal')?.classList.contains('open')){
         setImageEditMode(imageEditMode);
     }
+    if(promptTemplatePanel?.classList?.contains('open')) renderPromptTemplatePanel();
     render();
 });
 window.onload = async () => {
     applyTheme(localStorage.getItem('studio_theme') || localStorage.getItem('canvas_theme') || 'light');
     loadPromptPresets();
+    loadPromptTemplateGroups();
+    loadPromptTemplateOverrides();
+    await loadPromptTemplates();
     if(window.StudioI18n) window.StudioI18n.apply();
     if(window.lucide) lucide.createIcons();
+    connectAssetLibrarySyncSocket();
     await loadConfig();
     await loadAssetLibrary();
     await loadCanvas();
