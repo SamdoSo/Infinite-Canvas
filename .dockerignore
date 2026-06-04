@@ -1,0 +1,37 @@
+# Git
+.git
+.gitignore
+
+# Python env and cache
+python/
+packages/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Local Windows/Mac execution scripts and files
+*.bat
+*.sh
+*.command
+get-pip.py
+说明.png
+运行说明.txt
+MAC-使用说明.md
+
+# Runtime data (should be mounted via volumes)
+data/
+assets/
+output/
+API/
+history.json
+global_config.json
+
+# IDEs
+.vscode/
+.idea/

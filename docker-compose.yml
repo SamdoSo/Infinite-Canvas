@@ -1,0 +1,20 @@
+services:
+  infinite-canvas:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: infinite-canvas
+    ports:
+      - "3000:3000"
+    volumes:
+      # 挂载数据目录，持久化画布、运行历史和用户配置
+      - ./data:/app/data
+      # 挂载素材库目录，持久化上传和生成的图片/音视频素材
+      - ./assets:/app/assets
+      # 挂载 API 配置目录，持久化 API Key 等 env 配置
+      - ./API:/app/API
+      # 挂载输出目录（若有）
+      - ./output:/app/output
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
