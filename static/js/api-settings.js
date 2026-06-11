@@ -7,6 +7,7 @@ const nameInput = document.getElementById('nameInput');
 const idInput = document.getElementById('idInput');
 const baseInput = document.getElementById('baseInput');
 const protocolInput = document.getElementById('protocolInput');
+const imageRequestModeInput = document.getElementById('imageRequestModeInput');
 const keyInput = document.getElementById('keyInput');
 const keyHint = document.getElementById('keyHint');
 const rhFreeKeyInput = document.getElementById('rhFreeKeyInput');
@@ -131,6 +132,22 @@ const RECOMMENDED_APIS = [
         chat_models:['gpt-5.5'],
         video_models:['veo3.1-fast'],
         model_protocols:{'gemini-3.1-flash-image-preview':'gemini', 'gemini-3-pro-image-preview':'gemini'}
+    },
+    {
+        name:'Agnes AI',
+        base_url:'https://apihub.agnes-ai.com',
+        protocol:'openai',
+        image_request_mode:'openai-json',
+        register_url:'https://platform.agnes-ai.com/settings/apiKeys',
+        tagKeys:['api.tagImageModels','api.tagVideoModels','api.tagLlmModels'],
+        icons:['IMG','VID','LLM'],
+        summaryKey:'api.recommendAgnesSummary',
+        perkKey:'api.recommendAgnesFree',
+        perkClass:'recommend-free-tag',
+        advantages:['免费额度可用', '支持 Agnes 图像与视频接口', 'OpenAI 兼容地址配置简单'],
+        image_models:['agnes-image-2.1-flash', 'agnes-image-2.0-flash'],
+        chat_models:[],
+        video_models:['agnes-video-v2.0']
     },
     {
         name:'FHL',
@@ -591,6 +608,11 @@ function syncEditor(){
     item.base_url = selectedProtocol === 'jimeng' ? '' : baseInput.value.trim();
     // 固定平台不从协议下拉读取
     item.protocol = selectedProtocol;
+    item.image_request_mode = normalizeImageRequestMode(
+        item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || item.id === 'jimeng'
+            ? 'openai'
+            : (imageRequestModeInput?.value || item.image_request_mode)
+    );
     item.image_generation_endpoint = '';
     item.image_edit_endpoint = '';
     item.rh_apps = normalizeRhEntries(item.rh_apps || [], 'app');
@@ -645,8 +667,15 @@ function createRhEntryFromPaste(){
     if(!parsed){ setStatus('请粘贴 /run/ai-app/... 或 /run/workflow/...'); return; }
     ensureRunningHubLists(item);
     const listKey = parsed.type === 'app' ? 'rh_apps' : 'rh_workflows';
-    const exists = item[listKey].some(entry => entry.id === parsed.id);
-    if(!exists){
+    const existingIndex = item[listKey].findIndex(entry => entry.id === parsed.id);
+    const exists = existingIndex >= 0 && item[listKey][existingIndex]?.hidden !== true;
+    if(existingIndex >= 0 && item[listKey][existingIndex]?.hidden === true){
+        item[listKey][existingIndex] = {
+            ...item[listKey][existingIndex],
+            enabled:true,
+            hidden:false
+        };
+    } else if(!exists){
         item[listKey].unshift({
             id:parsed.id,
             appId:parsed.type === 'app' ? parsed.id : undefined,
@@ -671,13 +700,32 @@ function updateRhEntry(kind, index, prop, value){
     if(prop === 'title') setStatus('名称已修改，点保存生效');
     if(prop === 'note') setStatus('备注已修改，点保存生效');
 }
+function isStaticRunningHubEntry(kind, entry){
+    const id = String((kind === 'app' ? (entry?.appId || entry?.id) : (entry?.workflowId || entry?.id)) || '').trim();
+    const thumb = String(entry?.thumbnail || '');
+    if(thumb.includes('/static/runninghub/')) return true;
+    if(id && thumb.includes(`${kind === 'app' ? 'app' : 'workflow'}-${id}`)) return true;
+    // 静态模板会随 /api/providers 合并返回完整字段；手动粘贴的新卡片通常没有这些配置。
+    return Array.isArray(entry?.fields) || (entry?.workflowJson && typeof entry.workflowJson === 'object') || (entry?.raw && typeof entry.raw === 'object');
+}
 function removeRhEntry(kind, index){
     const item = provider();
     if(!item || item.id !== 'runninghub') return;
     const listKey = kind === 'app' ? 'rh_apps' : 'rh_workflows';
     ensureRunningHubLists(item);
-    item[listKey].splice(index, 1);
+    const entry = item[listKey][index];
+    if(!entry) return;
+    if(isStaticRunningHubEntry(kind, entry)){
+        item[listKey][index] = {
+            ...entry,
+            enabled:false,
+            hidden:true
+        };
+    } else {
+        item[listKey].splice(index, 1);
+    }
     renderRunningHubCards();
+    setStatus('已删除，点击保存后生效');
 }
 function readFileAsDataUrl(file){
     return new Promise((resolve, reject) => {
@@ -1387,7 +1435,8 @@ async function buildRhPreviewNodeInfoList(){
         } else if(['NUMBER','SLIDER'].includes(kind) && String(value ?? '').trim() !== '' && !Number.isNaN(Number(value))) {
             value = Number(value);
         }
-        if(typeof value === 'string' && /[\r\n]/.test(value)) value = value.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0] || '';
+        // TEXT 自由文本要保留换行（多行提示词不能被截断成第一行）；其它单值字段才去换行。
+        if(typeof value === 'string' && kind !== 'TEXT' && /[\r\n]/.test(value)) value = value.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0] || '';
         result.push({nodeId:field.nodeId, fieldName:field.fieldName, fieldValue:value});
     }
     return result;
@@ -1924,7 +1973,7 @@ function renderRecommendApi(){
                 </div>
                 <p class="recommend-platform-summary">${escapeHtml(tr(api.summaryKey))}</p>
                 <div class="recommend-tags">
-                    ${api.perkKey ? `<span class="recommend-tag recommend-perk-tag"><i data-lucide="gift" class="w-3 h-3"></i><span>${escapeHtml(tr(api.perkKey))}</span></span>` : ''}
+                    ${api.perkKey ? `<span class="recommend-tag recommend-perk-tag ${escapeAttr(api.perkClass || '')}"><i data-lucide="gift" class="w-3 h-3"></i><span>${escapeHtml(tr(api.perkKey))}</span></span>` : ''}
                     ${(api.tagKeys || []).map(tag => `<span class="recommend-tag">${escapeHtml(tag.startsWith('api.') ? tr(tag) : tag)}</span>`).join('')}
                 </div>
             </div>
@@ -1980,6 +2029,7 @@ function recommendedProviderForApi(api){
         name:api.name,
         base_url:api.base_url,
         protocol:api.protocol,
+        image_request_mode:normalizeImageRequestMode(api.image_request_mode),
         image_generation_endpoint:'',
         image_edit_endpoint:'',
         enabled:true,
@@ -2010,6 +2060,10 @@ async function saveRecommendedApi(index){
     if(protocolInput){
         protocolInput.value = api.protocol;
         protocolInput.dispatchEvent(new Event('change'));
+    }
+    if(imageRequestModeInput){
+        imageRequestModeInput.value = normalizeImageRequestMode(api.image_request_mode);
+        imageRequestModeInput.dispatchEvent(new Event('change'));
     }
     syncEditor();
     const ok = await saveProviders();
@@ -2145,6 +2199,7 @@ function renderEditor(){
     baseInput.placeholder = EXAMPLE_BASE_URL;
     baseInput.value = item.base_url || '';
     if(protocolInput) protocolInput.value = item.id === 'runninghub' ? 'openai' : item.id === 'volcengine' ? 'volcengine' : item.id === 'jimeng' ? 'jimeng' : (item.protocol || 'openai');
+    if(imageRequestModeInput) imageRequestModeInput.value = normalizeImageRequestMode(item.image_request_mode);
     keyInput.value = '';
     keyInput.placeholder = item.has_key ? `${tr('api.keepCurrentKey')} ${item.key_preview || ''}` : tr('api.enterKey');
     keyHint.textContent = item.has_key ? `${tr('api.keySaved')}${item.key_env || 'API/.env'}` : tr('api.noKey');
@@ -2387,6 +2442,21 @@ function currentProviderApiKey(item){
     }
     return keyInput.value.trim();
 }
+function normalizeImageRequestMode(value){
+    return String(value || '').trim().toLowerCase() === 'openai-json' ? 'openai-json' : 'openai';
+}
+function imageRequestModeLabel(mode){
+    return normalizeImageRequestMode(mode) === 'openai-json' ? 'OpenAI JSON' : 'OpenAI 标准';
+}
+function applyDetectedImageRequestMode(mode){
+    const item = provider();
+    if(!item || !imageRequestModeInput) return false;
+    const detected = normalizeImageRequestMode(mode);
+    const changed = normalizeImageRequestMode(item.image_request_mode) !== detected || normalizeImageRequestMode(imageRequestModeInput.value) !== detected;
+    imageRequestModeInput.value = detected;
+    item.image_request_mode = detected;
+    return changed;
+}
 function applyDetectedProtocol(protocol){
     const item = provider();
     const detected = String(protocol || '').toLowerCase();
@@ -2418,7 +2488,13 @@ async function probeAsync(){
         const data = await fetch('/api/providers/probe-async', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, provider_id: item.id, protocol: currentProtocol })
+            body: JSON.stringify({
+                base_url: baseUrl,
+                api_key: apiKey,
+                provider_id: item.id,
+                protocol: currentProtocol,
+                image_request_mode: imageRequestModeInput?.value || item.image_request_mode || 'openai'
+            })
         }).then(async r => {
             if(!r.ok) throw new Error((await r.json()).detail || '请求失败');
             return r.json();
@@ -2430,6 +2506,7 @@ async function probeAsync(){
         if(protocolInput && !keepManualProtocol){
             applyDetectedProtocol(detectedProtocol || (isAsync ? 'apimart' : 'openai'));
         }
+        if(data.image_request_mode) applyDetectedImageRequestMode(data.image_request_mode);
         const rawJson = JSON.stringify(data.raw, null, 2);
         const probeMessage = String(data.message || '');
         const hideTasksEndpointTip = probeMessage.includes('/v1/tasks/');
@@ -2446,7 +2523,7 @@ async function probeAsync(){
                     : 'OpenAI 兼容';
         showVerifyResult(`
             ${hideTasksEndpointTip ? '' : `<div style="font-size:11px;font-weight:800;color:${color}">${icon} ${escapeHtml(probeMessage)}</div>`}
-            <div style="font-size:11px;color:var(--muted);font-weight:700;margin-top:2px">${keepManualProtocol ? '协议已验证为' : '协议已自动设置为'}：<strong style="color:var(--text)">${proto}</strong></div>
+            <div style="font-size:11px;color:var(--muted);font-weight:700;margin-top:2px">${keepManualProtocol ? '协议已验证为' : '协议已自动设置为'}：<strong style="color:var(--text)">${proto}</strong> · 图片接口：<strong style="color:var(--text)">${imageRequestModeLabel(imageRequestModeInput?.value || item.image_request_mode)}</strong></div>
             <details style="margin-top:6px">
                 <summary style="font-size:10.5px;color:var(--muted);cursor:pointer;font-weight:700;user-select:none">▸ 查看原始响应 (HTTP ${data.status_code})</summary>
                 <pre style="margin-top:6px;padding:10px 12px;border-radius:10px;background:var(--soft);border:1px solid var(--line-2);font-size:10.5px;font-family:ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-all;color:var(--text);max-height:200px;overflow:auto">${escapeHtml(rawJson)}</pre>
@@ -2474,7 +2551,13 @@ async function testConnection(){
         const apiKey = currentProviderApiKey(item);
         const data = await fetch('/api/providers/test-connection', {
             method: 'POST', headers: {'Content-Type':'application/json'},
-            body: JSON.stringify({ base_url: baseUrl, api_key: apiKey, provider_id: item.id, protocol: protocolInput?.value || 'openai' })
+            body: JSON.stringify({
+                base_url: baseUrl,
+                api_key: apiKey,
+                provider_id: item.id,
+                protocol: protocolInput?.value || 'openai',
+                image_request_mode: imageRequestModeInput?.value || item.image_request_mode || 'openai'
+            })
         }).then(async r => {
             if(!r.ok) throw new Error((await r.json()).detail || (tr('api.urlInvalid') || '验证失败'));
             return r.json();
@@ -2484,6 +2567,7 @@ async function testConnection(){
             if(detectedProtocol && detectedProtocol !== String(protocolInput?.value || '').toLowerCase()){
                 applyDetectedProtocol(detectedProtocol);
             }
+            if(data.image_request_mode) applyDetectedImageRequestMode(data.image_request_mode);
             // 存入 picker 状态并启用「选择模型」按钮，但不自动弹出
             lastFetchedAll = data.all || [];
             lastFetchedSuggestion = {
@@ -2498,7 +2582,8 @@ async function testConnection(){
                 ? `<div style="margin-top:6px;color:#92400e;font-size:11px;font-weight:700">${detectedProtocol === 'volcengine' ? '已自动识别为方舟/Ark 任务协议。' : ''}火山协议提示：模型列表只代表可见模型，聊天模型建议填写你在方舟控制台创建的 <code>ep-...</code> 推理接入点。</div>`
                 : '';
             const jimengNote = isJimeng ? `<div style="margin-top:6px;color:#15803d;font-size:11px;font-weight:700">即梦 CLI 已可用，可在画布里选择“即梦 CLI”生成。</div>` : '';
-            showVerifyResult(`<span style="color:#15803d;font-size:11px;font-weight:800">✓ 地址验证通过 · 找到 ${data.model_count} 个模型</span>${volcengineNote}${jimengNote}`);
+            const imageModeNote = ` · 图片接口：${imageRequestModeLabel(imageRequestModeInput?.value || item.image_request_mode)}`;
+            showVerifyResult(`<span style="color:#15803d;font-size:11px;font-weight:800">✓ 地址验证通过 · 找到 ${data.model_count} 个模型${imageModeNote}</span>${volcengineNote}${jimengNote}`);
         } else {
             showVerifyResult(`
                 <div style="font-size:11px;font-weight:800;color:#b45309">⚠ 地址验证未通过 (HTTP ${data.status})</div>
@@ -2528,7 +2613,13 @@ async function fetchModels(){
         const data = await fetch('/api/providers/fetch-models', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({base_url:baseUrl, api_key:apiKey, provider_id:item.id, protocol:protocolInput?.value || 'openai'})
+            body:JSON.stringify({
+                base_url:baseUrl,
+                api_key:apiKey,
+                provider_id:item.id,
+                protocol:protocolInput?.value || 'openai',
+                image_request_mode:imageRequestModeInput?.value || item.image_request_mode || 'openai'
+            })
         }).then(async r => {
             if(!r.ok) throw new Error((await r.json()).detail || (tr('api.urlInvalid') || '拉取失败'));
             return r.json();
@@ -2543,11 +2634,13 @@ async function fetchModels(){
         if(detectedProtocol && detectedProtocol !== String(protocolInput?.value || '').toLowerCase()){
             applyDetectedProtocol(detectedProtocol);
         }
+        if(data.image_request_mode) applyDetectedImageRequestMode(data.image_request_mode);
         // 启用「选择模型」按钮，并 statusbar 显示已拉取数量
         const openBtn = document.getElementById('openPickerBtn');
         if(openBtn){ openBtn.disabled = false; openBtn.style.opacity = '1'; }
         const extra = (detectedProtocol === 'volcengine' || isVolcengineProvider(item)) ? ' · 已识别方舟协议，火山聊天建议改填 ep-... 接入点' : '';
-        setStatus(`已拉取 ${data.total} 个模型 · 点「选择模型」勾选要导入的${extra}`);
+        const imageModeExtra = normalizeImageRequestMode(imageRequestModeInput?.value || item.image_request_mode) === 'openai-json' ? ' · 图片接口已设为 OpenAI JSON' : '';
+        setStatus(`已拉取 ${data.total} 个模型 · 点「选择模型」勾选要导入的${extra}${imageModeExtra}`);
         openModelPicker();
     } catch(e){
         alert('拉取失败：' + (e.message || e));
@@ -2804,7 +2897,7 @@ function addProvider(){
     let id = 'custom-api';
     let index = 2;
     while(providers.some(item => item.id === id)) id = `custom-api-${index++}`;
-    providers.push({id, name:'API', base_url:'', protocol:'openai', image_generation_endpoint:'', image_edit_endpoint:'', enabled:true, primary:false, image_models:[], chat_models:[], video_models:[], has_key:false, key_preview:''});
+    providers.push({id, name:'API', base_url:'', protocol:'openai', image_request_mode:'openai', image_generation_endpoint:'', image_edit_endpoint:'', enabled:true, primary:false, image_models:[], chat_models:[], video_models:[], has_key:false, key_preview:''});
     selectedId = id;
     renderEditor();
 }
@@ -2946,6 +3039,11 @@ async function saveProviders(){
             : item.id === 'jimeng'
             ? 'jimeng'
             : ['openai', 'apimart', 'gemini', 'volcengine', 'jimeng'].includes(String(item.protocol || '').toLowerCase()) ? String(item.protocol).toLowerCase() : 'openai';
+        item.image_request_mode = normalizeImageRequestMode(
+            item.id === 'modelscope' || item.id === 'runninghub' || item.id === 'volcengine' || item.id === 'jimeng'
+                ? 'openai'
+                : item.image_request_mode
+        );
         if(item.id === 'jimeng') item.base_url = '';
         if(item.id === 'jimeng') item.video_models = unique([...(item.video_models || []).filter(model => !JIMENG_LEGACY_VIDEO_MODELS.has(String(model || '').trim())), ...JIMENG_DEFAULT_VIDEO_MODELS]);
         item.image_generation_endpoint = '';
@@ -2978,6 +3076,7 @@ async function saveProviders(){
                 name:item.name,
                 base_url:item.base_url,
                 protocol:(item.id === 'modelscope') ? 'openai' : item.id === 'runninghub' ? 'runninghub' : item.id === 'volcengine' ? 'volcengine' : item.id === 'jimeng' ? 'jimeng' : (item.protocol || 'openai'),
+                image_request_mode:item.image_request_mode || 'openai',
                 image_generation_endpoint:item.image_generation_endpoint || '',
                 image_edit_endpoint:item.image_edit_endpoint || '',
                 enabled:item.enabled !== false,
@@ -3068,6 +3167,11 @@ window.onload = () => {
     // 平台名输入时实时预览生成的 ID
     if(nameInput) nameInput.addEventListener('input', updateIdPreview);
     if(protocolInput) protocolInput.addEventListener('change', updateProtocolFromInput);
+    if(imageRequestModeInput) imageRequestModeInput.addEventListener('change', () => {
+        const item = provider();
+        if(!item) return;
+        item.image_request_mode = normalizeImageRequestMode(imageRequestModeInput.value);
+    });
     [keyInput, rhFreeKeyInput, rhWalletKeyInput].forEach(input => {
         if(input) input.addEventListener('input', refreshProviderOnboarding);
     });

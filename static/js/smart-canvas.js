@@ -21,6 +21,12 @@ const imageEditModal = document.getElementById('imageEditModal');
 const smartLogModal = document.getElementById('smartLogModal');
 const smartLogList = document.getElementById('smartLogList');
 const smartShortcutModal = document.getElementById('smartShortcutModal');
+const smartWorkflowToggle = document.getElementById('smartWorkflowToggle');
+const smartWorkflowTransferModal = document.getElementById('smartWorkflowTransferModal');
+const smartWorkflowTransferSub = document.getElementById('smartWorkflowTransferSub');
+const smartWorkflowExportMeta = document.getElementById('smartWorkflowExportMeta');
+const smartWorkflowImportInput = document.getElementById('smartWorkflowImportInput');
+const smartWorkflowImportDropZone = document.getElementById('smartWorkflowImportDropZone');
 const selectionBox = document.getElementById('selectionBox');
 const assetToggle = document.getElementById('assetToggle');
 const assetPanel = document.getElementById('assetPanel');
@@ -31,6 +37,8 @@ const assetGrid = document.getElementById('assetGrid');
 const assetDropZone = document.getElementById('assetDropZone');
 const workflowEmpty = document.getElementById('workflowEmpty');
 const assetImageControls = document.getElementById('assetImageControls');
+const assetAddCategoryBtn = document.getElementById('assetAddCategoryBtn');
+const assetRenameCategoryBtn = document.getElementById('assetRenameCategoryBtn');
 const assetDialogBackdrop = document.getElementById('assetDialogBackdrop');
 const assetDialogTitle = document.getElementById('assetDialogTitle');
 const assetDialogInput = document.getElementById('assetDialogInput');
@@ -56,6 +64,7 @@ const promptTemplateBody = document.getElementById('promptTemplateBody');
 const composerTemplateBtn = document.getElementById('composerTemplateBtn');
 let minimapViewport = document.getElementById('minimapViewport');
 let canvas = null;
+let canvasUsesConnections = true;
 let nodes = [];
 let selectedId = '';
 let selectedIds = [];
@@ -66,6 +75,7 @@ let selectionState = null;
 let isRKeyDown = false;
 let selectionJustFinished = false;
 let resizeState = null;
+let llmInstructionResizeState = null;
 let thumbDragState = null;
 let uploadTargetId = '';
 let pendingGroupUploadPoint = null;
@@ -82,6 +92,10 @@ let assetLibraryOpen = false;
 let assetTab = 'image';
 let activeAssetCategoryId = '';
 let activeAssetLibraryId = '';
+let activeWorkflowAssetCategoryId = '';
+const LOCAL_ASSET_LIBRARY_ID = '__local_assets__';
+let localAssetLibrary = {items:[], tree:null};
+let activeLocalAssetFolderId = '__root__';
 let mentionSource = 'input';
 let mentionAssetCategoryId = '';
 let assetLibraryUpdatedAt = 0;
@@ -217,6 +231,12 @@ let gridCustomLines = [];
 let gridCustomOrientation = 'h';
 let gridCustomHistory = [];
 let gridCustomDrag = null;
+let gridOperationMode = 'split';
+let gridJoinLayout = null;
+let gridJoinDrag = null;
+let gridJoinImageCache = new Map();
+let gridJoinUserMoved = false;
+let gridJoinOutputSize = 2048;
 let imageEditZoom = 1.0;
 let imageEditBaseW = 0;
 let imageEditBaseH = 0;
@@ -346,6 +366,81 @@ function refreshIcons(){ if(window.lucide) lucide.createIcons(); }
 function uid(prefix){ return `${prefix}_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36).slice(-4)}`; }
 function escapeHtml(str){ return String(str == null ? '' : str).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])); }
 const escapeAttr = escapeHtml;
+function smartMediaPreviewUrl(itemOrUrl, size=512){
+    const url = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
+    const displayUrl = displayMediaUrl(itemOrUrl);
+    const raw = String(url || '');
+    if(!raw || raw.startsWith('data:') || raw.startsWith('blob:')) return displayUrl;
+    if(!raw.startsWith('/output/') && !raw.startsWith('/assets/')) return displayUrl;
+    if(!/\.(png|jpe?g|webp|gif|bmp|avif|tiff?|mp4|webm|mov|m4v)(\?|#|$)/i.test(raw)) return displayUrl;
+    const width = Math.max(64, Math.min(2048, Math.round(Number(size) || 512)));
+    return `/api/media-preview?w=${width}&url=${encodeURIComponent(raw)}`;
+}
+function smartPreviewImgHtml(itemOrUrl, size=512, attrs=''){
+    const original = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
+    const preview = smartMediaPreviewUrl(itemOrUrl, size);
+    return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}"${attrs ? ` ${attrs}` : ''}>`;
+}
+function smartVideoPreviewHtml(itemOrUrl, size=512, attrs=''){
+    const original = typeof itemOrUrl === 'string' ? itemOrUrl : (itemOrUrl?.url || '');
+    const preview = smartMediaPreviewUrl(itemOrUrl, size);
+    return `<img src="${escapeHtml(preview)}" data-preview-src="${escapeAttr(preview)}" data-original-src="${escapeAttr(original)}" data-url="${escapeAttr(original)}" data-preview-kind="video"${attrs ? ` ${attrs}` : ''}>`;
+}
+function smartVideoFallbackHtml(url, attrs=''){
+    const safe = escapeHtml(url || '');
+    return `<video src="${safe}" data-url="${safe}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"${attrs ? ` ${attrs}` : ''}></video>`;
+}
+function smartVideoPlayerHtml(url, attrs=''){
+    const safe = escapeHtml(displayMediaUrl({url:url || ''}));
+    return `<video src="${safe}" data-url="${escapeAttr(url || '')}" data-inline-video-active="1" controls autoplay playsinline preload="metadata" disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"${attrs ? ` ${attrs}` : ''}></video>`;
+}
+function smartActivateVideoPreview(target){
+    const root = target?.closest?.('.media-video-card,.video-thumb,.image-wrap,.thumb-item') || target?.parentElement || null;
+    const img = target?.matches?.('img[data-preview-kind="video"]') ? target : root?.querySelector?.('img[data-preview-kind="video"]');
+    if(!img) return false;
+    const original = img.dataset.originalSrc || img.dataset.url || '';
+    if(!original) return false;
+    const itemEl = target?.closest?.('[data-image-index]') || root?.closest?.('[data-image-index]') || root;
+    const nodeEl = target?.closest?.('.image-node') || root?.closest?.('.image-node');
+    const node = nodes.find(n => n.id === nodeEl?.dataset.id);
+    const imageIndex = Number(itemEl?.dataset?.imageIndex ?? 0);
+    const image = node?.images?.[imageIndex];
+    if(image) image._inlineVideoActive = true;
+    const tpl = document.createElement('template');
+    tpl.innerHTML = smartVideoPlayerHtml(original);
+    const video = tpl.content.firstElementChild;
+    if(!video) return false;
+    img.replaceWith(video);
+    video.parentElement?.querySelector?.('.smart-video-play')?.style?.setProperty('display', 'none');
+    video.addEventListener('ended', () => {
+        if(image) image._inlineVideoActive = true;
+        video.dataset.inlineVideoActive = '1';
+    });
+    video.play?.().catch(() => {});
+    return true;
+}
+function isSmartPreviewImage(img){
+    return img?.tagName?.toLowerCase?.() === 'img'
+        && img.dataset?.previewSrc
+        && img.dataset?.originalSrc
+        && img.dataset.previewSrc !== img.dataset.originalSrc
+        && img.getAttribute('src') !== img.dataset.originalSrc;
+}
+function bindSmartPreviewImageFallbacks(root=document){
+    root.querySelectorAll?.('img[data-preview-src][data-original-src]:not([data-preview-fallback-bound])').forEach(img => {
+        img.dataset.previewFallbackBound = '1';
+        img.addEventListener('error', () => {
+            const original = img.dataset.originalSrc || '';
+            if(img.dataset.previewKind === 'video'){
+                const tpl = document.createElement('template');
+                tpl.innerHTML = smartVideoFallbackHtml(original, img.dataset.videoFallbackAttrs || '');
+                img.replaceWith(tpl.content.firstElementChild);
+                return;
+            }
+            if(original && img.getAttribute('src') !== original) img.src = original;
+        });
+    });
+}
 function cloneSmartSettings(source=settings){
     try {
         return JSON.parse(JSON.stringify(source || {}));
@@ -368,6 +463,7 @@ function mediaItemForStorage(item){
     delete clean.uploadedUrl;
     delete clean.originalRemoteUrl;
     delete clean.tempCloudUrl;
+    delete clean._inlineVideoActive;
     return clean;
 }
 function canvasForStorage(){
@@ -378,6 +474,203 @@ function canvasForStorage(){
         if(node.runSettings) node.runSettings = settingsForStorage(node.runSettings);
     });
     return clean;
+}
+function apiErrorMessage(data, fallback='请求失败'){
+    if(!data) return fallback;
+    if(typeof data === 'string') return data || fallback;
+    const detail = data.detail ?? data.error ?? data.message;
+    if(typeof detail === 'string') return detail || fallback;
+    if(Array.isArray(detail)){
+        const messages = detail.map(item => {
+            if(typeof item === 'string') return item;
+            const loc = Array.isArray(item?.loc) ? item.loc.filter(x => x !== 'body').join('.') : '';
+            const msg = item?.msg || item?.message || JSON.stringify(item);
+            return loc ? `${loc}: ${msg}` : msg;
+        }).filter(Boolean);
+        return messages.join('\n') || fallback;
+    }
+    if(detail && typeof detail === 'object') return detail.message || detail.msg || JSON.stringify(detail);
+    try {
+        return JSON.stringify(data);
+    } catch(e) {
+        return fallback;
+    }
+}
+async function responseErrorMessage(response, fallback='请求失败'){
+    try {
+        const data = await response.clone().json();
+        return apiErrorMessage(data, fallback);
+    } catch(e) {
+        try {
+            const text = await response.text();
+            return text || fallback;
+        } catch(_) {
+            return fallback;
+        }
+    }
+}
+function downloadBlob(blob, filename){
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename || 'smart-canvas-workflow.json';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 800);
+}
+function smartWorkflowFilename(ext='json'){
+    const title = (canvas?.title || document.getElementById('smartTitle')?.textContent || 'smart-canvas').trim();
+    const safe = title.replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, '-').slice(0, 48) || 'smart-canvas';
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '');
+    return `${safe}-workflow-${stamp}.${ext}`;
+}
+function serializableSmartNode(node){
+    const base = JSON.parse(JSON.stringify(node || {}));
+    const copy = normalizeLegacySmartNode(base) || {};
+    if(Array.isArray(copy.images)) copy.images = copy.images.map(img => mediaItemForStorage(stripImageGenerationMeta(img))).filter(Boolean);
+    if(copy.runSettings) copy.runSettings = settingsForStorage(copy.runSettings);
+    copy.running = false;
+    copy.pending = 0;
+    copy.queued = false;
+    copy.jimengPending = null;
+    delete copy.pendingTasks;
+    delete copy._dom;
+    return copy;
+}
+function selectedSmartWorkflowPayload(){
+    const ids = selectedNodeIds();
+    const idSet = new Set(ids);
+    const selectedNodes = nodes.filter(node => idSet.has(node.id)).map(serializableSmartNode);
+    const selectedSet = new Set(selectedNodes.map(node => node.id));
+    const selectedConnections = (canvas?.connections || [])
+        .filter(conn => selectedSet.has(conn.from) && selectedSet.has(conn.to))
+        .map(conn => JSON.parse(JSON.stringify(conn)));
+    return {
+        format:'infinite-smart-canvas-workflow',
+        version:1,
+        canvas_type:'smart',
+        exported_at:Date.now(),
+        nodes:selectedNodes,
+        connections:selectedConnections
+    };
+}
+function normalizeImportedSmartWorkflow(data){
+    if(Array.isArray(data)) return {nodes:data, connections:[]};
+    if(Array.isArray(data?.nodes)) return {nodes:data.nodes, connections:Array.isArray(data.connections) ? data.connections : []};
+    if(Array.isArray(data?.workflow?.nodes)) return {nodes:data.workflow.nodes, connections:Array.isArray(data.workflow.connections) ? data.workflow.connections : []};
+    return {nodes:[], connections:[]};
+}
+function openSmartWorkflowTransferModal(){
+    if(!canvas){ toast('请先打开画布'); return; }
+    toggleAssetLibrary(false);
+    updateSmartWorkflowTransferMeta();
+    smartWorkflowTransferModal?.classList.add('open');
+    smartWorkflowToggle?.classList.add('active');
+    refreshIcons();
+}
+function closeSmartWorkflowTransferModal(){
+    smartWorkflowTransferModal?.classList.remove('open');
+    smartWorkflowToggle?.classList.remove('active');
+    smartWorkflowImportDropZone?.classList.remove('drag-over');
+}
+function updateSmartWorkflowTransferMeta(){
+    const payload = selectedSmartWorkflowPayload();
+    const nodeCount = payload.nodes.length;
+    const connCount = payload.connections.length;
+    smartWorkflowExportMeta?.classList.remove('busy', 'success');
+    if(smartWorkflowExportMeta) smartWorkflowExportMeta.textContent = nodeCount ? `已选择 ${nodeCount} 个节点，${connCount} 条连线` : '未选择节点，请先选中要导出的组件';
+    if(smartWorkflowTransferSub) smartWorkflowTransferSub.textContent = nodeCount ? '导出当前选中内容，或把工作流导入到当前画布' : '请先选中节点再导出；导入会追加到当前画布';
+}
+async function exportSelectedSmartWorkflow(includeResources=false){
+    if(!canvas) return;
+    const payload = selectedSmartWorkflowPayload();
+    if(!payload.nodes.length){
+        updateSmartWorkflowTransferMeta();
+        toast('未选择节点，请先选中要导出的组件');
+        return;
+    }
+    try {
+        if(!includeResources){
+            downloadBlob(new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'}), smartWorkflowFilename('json'));
+            toast('已导出智能画布工作流 JSON');
+            return;
+        }
+        if(smartWorkflowExportMeta){
+            smartWorkflowExportMeta.classList.add('busy');
+            smartWorkflowExportMeta.textContent = '正在打包资源...';
+        }
+        const filename = smartWorkflowFilename('zip');
+        const res = await fetch('/api/canvas-workflows/export', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({...payload, include_resources:true, filename})
+        });
+        if(!res.ok) throw new Error(await responseErrorMessage(res, '导出工作流失败'));
+        downloadBlob(await res.blob(), filename);
+        if(smartWorkflowExportMeta){
+            smartWorkflowExportMeta.classList.remove('busy');
+            smartWorkflowExportMeta.classList.add('success');
+            smartWorkflowExportMeta.textContent = `已导出 ${payload.nodes.length} 个节点，包含可找到的本地资源`;
+        }
+        toast('已导出包含资源的智能画布工作流包');
+        setTimeout(() => {
+            if(smartWorkflowTransferModal?.classList.contains('open')) updateSmartWorkflowTransferMeta();
+        }, 1600);
+    } catch(err) {
+        smartWorkflowExportMeta?.classList.remove('busy', 'success');
+        toast(err.message || '导出工作流失败');
+    }
+}
+function insertSmartWorkflowIntoCanvas(imported){
+    const srcNodes = (imported.nodes || []).filter(Boolean);
+    const srcConnections = (imported.connections || []).filter(Boolean);
+    if(!canvas || !srcNodes.length) throw new Error('工作流中没有可导入的节点');
+    pushUndo();
+    const minX = Math.min(...srcNodes.map(n => Number(n.x || 0)));
+    const minY = Math.min(...srcNodes.map(n => Number(n.y || 0)));
+    const target = viewportCenter();
+    const dx = target.x - minX;
+    const dy = target.y - minY;
+    const idMap = new Map();
+    const newNodes = srcNodes.map(source => {
+        const copy = serializableSmartNode(source);
+        const oldId = copy.id || uid(copy.type || 'smart');
+        copy.id = uid(copy.type || 'smart');
+        copy.x = Number(copy.x || 0) + dx;
+        copy.y = Number(copy.y || 0) + dy;
+        copy.created_at = copy.created_at || Date.now();
+        idMap.set(oldId, copy.id);
+        return normalizeLegacySmartNode(copy);
+    }).filter(Boolean);
+    const newConnections = srcConnections
+        .map(conn => ({...JSON.parse(JSON.stringify(conn)), from:idMap.get(conn.from), to:idMap.get(conn.to)}))
+        .filter(conn => conn.from && conn.to);
+    nodes.push(...newNodes);
+    canvas.connections = [...(canvas.connections || []), ...newConnections];
+    selectedIds = newNodes.length > 1 ? newNodes.map(node => node.id) : [];
+    selectedId = newNodes.length === 1 ? newNodes[0].id : '';
+    selectedImage = {nodeId:'', index:-1};
+    activeComposerSubject = null;
+    render();
+    scheduleSave();
+    toast(`已导入 ${newNodes.length} 个节点`);
+}
+async function importSmartWorkflowFile(file){
+    if(!canvas || !file) return;
+    try {
+        if(smartWorkflowTransferSub) smartWorkflowTransferSub.textContent = '正在导入工作流...';
+        const form = new FormData();
+        form.append('file', file);
+        const res = await fetch('/api/canvas-workflows/import', {method:'POST', body:form});
+        if(!res.ok) throw new Error(await responseErrorMessage(res, '导入工作流失败'));
+        const data = await res.json();
+        insertSmartWorkflowIntoCanvas(normalizeImportedSmartWorkflow(data));
+        closeSmartWorkflowTransferModal();
+    } catch(err) {
+        if(smartWorkflowTransferModal?.classList.contains('open')) updateSmartWorkflowTransferMeta();
+        toast(err.message || '导入工作流失败');
+    }
 }
 const RECENT_SMART_SETTINGS_KEY = 'smart_canvas_recent_run_settings_v1';
 const initialSmartSettings = cloneSmartSettings(settings);
@@ -658,6 +951,7 @@ function clearImageClickTimer(){
     }
 }
 function syncSelectionUi(){
+    world.classList.toggle('smart-multi-selected', selectedNodeIds().length > 1);
     world.querySelectorAll('.image-node').forEach(el => {
         const id = el.dataset.id || '';
         el.classList.toggle('selected', isNodeSelected(id));
@@ -690,6 +984,7 @@ const MEDIA_NODE_DEFAULT_SCALE = 2;
 const MEDIA_GROUP_PREVIOUS_DEFAULT_SCALE = 1.6;
 const MEDIA_GROUP_DEFAULT_SCALE = 0.8;
 const MEDIA_GROUP_THUMB_BASE = 224;
+const MEDIA_GROUP_MAX_VISIBLE_ROWS = 3;
 const EMPTY_UPLOAD_NODE_WIDTH = 316;
 const EMPTY_UPLOAD_NODE_HEIGHT = 194;
 function mediaNodeDefaultScale(node){
@@ -700,14 +995,28 @@ function createImageNodeAt(point, images=[], options={}){
     const layout = imageLayout(images || [], mediaNodeDefaultScale({type:'smart-image', images:images || []}), {type:'smart-image', images:images || []});
     return createNode((point?.x || 0) - Math.round(layout.width / 2), (point?.y || 0) - Math.round(layout.height / 2), images, options);
 }
+function mediaLayoutSize(img){
+    const width = Number(img?.natural_w || img?.width || img?.w || img?.layout_w || img?.preview_w || 0);
+    const height = Number(img?.natural_h || img?.height || img?.h || img?.layout_h || img?.preview_h || 0);
+    return width > 0 && height > 0 ? {width, height} : {width:0, height:0};
+}
+function copyMediaSizeFields(source, target={}){
+    if(!source || typeof source !== 'object') return target;
+    ['natural_w','natural_h','width','height','w','h','layout_w','layout_h'].forEach(key => {
+        const n = Number(source[key]);
+        if(Number.isFinite(n) && n > 0) target[key] = n;
+    });
+    return target;
+}
 function singleImageLayout(image, node, scale){
     const explicitW = Number(node?.w);
     const explicitH = Number(node?.h);
     if(Number.isFinite(explicitW) && explicitW > 24 && Number.isFinite(explicitH) && explicitH > 24){
         return {cols:1, rows:1, width:Math.round(explicitW), height:Math.round(explicitH), thumb:Math.round(96 * scale), single:true};
     }
-    const naturalW = Number(image?.natural_w || image?.width || 0);
-    const naturalH = Number(image?.natural_h || image?.height || 0);
+    const layoutSize = mediaLayoutSize(image);
+    const naturalW = layoutSize.width;
+    const naturalH = layoutSize.height;
     if(naturalW > 0 && naturalH > 0){
         const maxW = 260 * scale;
         const maxH = 220 * scale;
@@ -723,18 +1032,19 @@ function singleImageLayout(image, node, scale){
     }
     return {cols:1, rows:1, width:Math.round(260*scale), height:Math.round(180*scale), thumb:Math.round(96*scale), single:true};
 }
-function groupImageGridLayout(count, explicitW, explicitH, maxThumb, pad=32, gap=8){
+function groupImageGridLayout(count, explicitW, explicitH, maxThumb, pad=32, gap=8, maxVisibleRows=MEDIA_GROUP_MAX_VISIBLE_ROWS){
     let best = null;
     for(let cols = 1; cols <= count; cols++){
         const rows = Math.ceil(count / cols);
+        const visibleRows = Math.min(Math.max(1, maxVisibleRows), rows);
         const availableW = explicitW - pad - (cols - 1) * gap;
-        const availableH = explicitH - pad - (rows - 1) * gap;
+        const availableH = explicitH - pad - (visibleRows - 1) * gap;
         if(availableW <= 0 || availableH <= 0) continue;
-        const rawThumb = Math.floor(Math.min(availableW / cols, availableH / rows));
+        const rawThumb = Math.floor(Math.min(availableW / cols, availableH / visibleRows));
         const fittedThumb = Math.max(28, Math.min(maxThumb, rawThumb));
         const fits = rawThumb >= 28;
         const usedW = cols * fittedThumb + (cols - 1) * gap + pad;
-        const usedH = rows * fittedThumb + (rows - 1) * gap + pad;
+        const usedH = visibleRows * fittedThumb + (visibleRows - 1) * gap + pad;
         const spareW = Math.max(0, explicitW - usedW);
         const spareH = Math.max(0, explicitH - usedH);
         const atMax = fittedThumb >= maxThumb;
@@ -754,10 +1064,12 @@ function groupImageGridLayout(count, explicitW, explicitH, maxThumb, pad=32, gap
             }
         }
         if(better){
-            best = {cols, rows, thumb:fittedThumb, score};
+            best = {cols, rows, visibleRows, thumb:fittedThumb, score};
         }
     }
-    return best || {cols:Math.min(count, 2), rows:Math.ceil(count / Math.min(count, 2)), thumb:28};
+    const fallbackCols = Math.min(count, 2);
+    const fallbackRows = Math.ceil(count / fallbackCols);
+    return best || {cols:fallbackCols, rows:fallbackRows, visibleRows:Math.min(MEDIA_GROUP_MAX_VISIBLE_ROWS, fallbackRows), thumb:28};
 }
 function smartNodeInputThumbRows(count){
     return count ? Math.ceil(Math.min(10, count) / 5) : 0;
@@ -783,15 +1095,25 @@ function smartNodeInputThumbsHtml(images, opts={}){
         const media = isAudioMediaItem(img)
             ? `<div class="media-thumb audio-thumb"><i data-lucide="file-audio"></i><span>${escapeHtml(img.name || 'Audio')}</span></div>`
             : isVideoMediaItem(img)
-            ? `<video src="${escapeHtml(img.url)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video>`
-            : `<img src="${escapeHtml(img.url)}" alt="">`;
+            ? smartVideoPreviewHtml(img, 256, 'alt=""')
+            : smartPreviewImgHtml(img, 256, 'alt=""');
         return `<div class="smart-node-input-thumb" title="${escapeHtml(label)}">${media}<span class="smart-node-input-badge">${escapeHtml(label)}</span></div>`;
     }).join('');
     const more = refs.length > limit ? `<div class="smart-node-input-thumb smart-node-input-more">+${refs.length - limit}</div>` : '';
     return `<div class="smart-node-input-thumbs">${items}${more}</div>`;
 }
+const PROMPT_LLM_INSTRUCTION_DEFAULT_H = 58;
+const PROMPT_LLM_INSTRUCTION_MIN_H = 40;
+const PROMPT_LLM_INSTRUCTION_MAX_H = 400;
+function promptLlmInstructionHeight(node){
+    const h = Number(node?.llmInstructionHeight);
+    if(!Number.isFinite(h)) return PROMPT_LLM_INSTRUCTION_DEFAULT_H;
+    return Math.max(PROMPT_LLM_INSTRUCTION_MIN_H, Math.min(PROMPT_LLM_INSTRUCTION_MAX_H, Math.round(h)));
+}
 function promptNodeExpandedHeight(node){
-    return (node?.llmSystemEnabled ? 344 : 292) + smartNodeInputThumbsHeight(promptNodeInputImages(node));
+    // 指令文本框（发送给 LLM 的内容）可拖动加高，超出默认高度的部分要叠加进节点高度。
+    const extra = Math.max(0, promptLlmInstructionHeight(node) - PROMPT_LLM_INSTRUCTION_DEFAULT_H);
+    return (node?.llmSystemEnabled ? 344 : 292) + smartNodeInputThumbsHeight(promptNodeInputImages(node)) + extra;
 }
 function promptNodeLayoutSize(node){
     const oldCollapsedH = 230;
@@ -836,21 +1158,23 @@ function imageLayout(images, scale=1, node=null){
     if(grid){
         const cols = Math.max(1, Number(grid.cols || 1));
         const rows = Math.max(1, Number(grid.rows || 1));
+        const visibleRows = Math.min(MEDIA_GROUP_MAX_VISIBLE_ROWS, rows);
         if(Number.isFinite(explicitW) && explicitW > 40 && Number.isFinite(explicitH) && explicitH > 40){
-            const fittedThumb = Math.max(28, Math.floor(Math.min((explicitW - PAD - (cols - 1) * 8) / cols, (explicitH - PAD - (rows - 1) * 8) / rows)));
-            return {cols, rows, width:Math.round(explicitW), height:Math.round(explicitH), thumb:fittedThumb};
+            const fittedThumb = Math.max(28, Math.floor(Math.min((explicitW - PAD - (cols - 1) * 8) / cols, (explicitH - PAD - (visibleRows - 1) * 8) / visibleRows)));
+            return {cols, rows, visibleRows, width:Math.round(explicitW), height:visibleRows * (fittedThumb + 8) - 8 + PAD, thumb:fittedThumb};
         }
-        return {cols, rows, width:Math.max(Math.round(226*s), cols * cell + PAD), height:rows * cell + PAD, thumb};
+        return {cols, rows, visibleRows, width:Math.max(Math.round(226*s), cols * cell + PAD), height:visibleRows * cell - 8 + PAD, thumb};
     }
     const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(count))));
     const rows = Math.ceil(count / cols);
+    const visibleRows = Math.min(MEDIA_GROUP_MAX_VISIBLE_ROWS, rows);
     if(Number.isFinite(explicitW) && explicitW > 40 && Number.isFinite(explicitH) && explicitH > 40){
         const fitted = groupImageGridLayout(count, explicitW, explicitH, thumb, PAD, 8);
-        return {cols:fitted.cols, rows:fitted.rows, width:Math.round(explicitW), height:Math.round(explicitH), thumb:fitted.thumb};
+        return {cols:fitted.cols, rows:fitted.rows, visibleRows:fitted.visibleRows, width:Math.round(explicitW), height:fitted.visibleRows * (fitted.thumb + 8) - 8 + PAD, thumb:fitted.thumb};
     }
     const width = Math.max(Math.round(226*s), cols * cell + PAD);
-    const height = rows * cell + PAD;
-    return {cols, rows, width, height, thumb};
+    const height = visibleRows * cell - 8 + PAD;
+    return {cols, rows, visibleRows, width, height, thumb};
 }
 function smartLoopCount(node){
     return Math.max(1, Math.min(100, Number(node?.count || 1) || 1));
@@ -879,6 +1203,11 @@ function nodeRect(node){
 }
 function applyViewport(){
     world.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`;
+    // world 被 transform:scale 缩放后，其内部带 backdrop-filter 的卡片（参数设置/合成卡等）
+    // 会被部分浏览器（Chrome/Edge 等 Blink 内核）当作独立合成层先按 1x 栅格化、再整体缩放，
+    // 缩小时位图被降采样 → 组件发虚。缩放态下关闭这些 backdrop-filter（底色本身已接近不透明，
+    // 观感几乎无差），让卡片随矢量重新栅格化，保持清晰。
+    world.classList.toggle('canvas-scaled', Math.abs(viewport.scale - 1) > 0.001);
     shell.style.backgroundSize = '24px 24px';
     shell.style.backgroundPosition = '0 0';
     renderMinimap();
@@ -1094,6 +1423,19 @@ function rhActiveFields(sourceSettings=settings){
     }
     fields = fields.filter(f => f.enabled === true);
     return sortRunningHubFields(fields);
+}
+function runningHubRunNeedsPrompt(sourceSettings=settings){
+    if((sourceSettings || settings).engine !== 'runninghub') return true;
+    const fields = rhActiveFields(sourceSettings);
+    const promptFields = fields.filter(field => rhFieldRole(field) === 'prompt');
+    if(!promptFields.length) return false;
+    return promptFields.some(field => field.required === true && !rhDefaultValue(field).trim());
+}
+function smartRunNeedsPrompt(sourceSettings=settings){
+    sourceSettings = sourceSettings || settings;
+    if(sourceSettings.engine === 'runninghub') return runningHubRunNeedsPrompt(sourceSettings);
+    if(sourceSettings.engine === 'comfy' && sourceSettings.comfyMode === 'enhance') return false;
+    return true;
 }
 function sortRunningHubFields(fields){
     return [...(fields || [])].sort((a, b) => {
@@ -2369,7 +2711,9 @@ async function rhBuildNodeInfoList(media, sourceSettings=settings, randomValues=
         if(rhFieldRole(field) === 'prompt' && !String(value || '').trim()) value = rhDefaultValue(field);
         if(['image','video','audio'].includes(kind)) value = await rhUploadValueIfNeeded(value, sourceSettings);
         if(['number','slider'].includes(kind) && String(value ?? '').trim() !== '' && !Number.isNaN(Number(value))) value = Number(value);
-        if(typeof value === 'string' && /[\r\n]/.test(value)) value = value.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0] || '';
+        // 只对“单值”字段（下拉/选项等）去换行；prompt / text 这类自由文本必须保留换行，
+        // 否则多行提示词会被截成第一行（例如“一只红猫\n金色的眼睛”只剩“一只红猫”）。
+        if(typeof value === 'string' && !['prompt','text'].includes(rhFieldRole(field)) && /[\r\n]/.test(value)) value = value.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0] || '';
         result.push({nodeId:field.nodeId, fieldName:field.fieldName, fieldValue:value});
     }
     return result;
@@ -2792,15 +3136,19 @@ function promptTemplateItems(){
             libraryId:activeLibrary.id
         }));
     }
-    const hidden = new Set(promptTemplateOverrides.hiddenBuiltinIds || []);
-    const builtins = builtinPromptTemplates
-        .filter(t => !hidden.has(t.id))
-        .map(t => ({...t, ...(promptTemplateOverrides.editedBuiltins?.[t.id] || {}), builtin:true}));
+    // 系统库的条目同样走后端（/api/prompt-libraries），与素材库管理共用一套数据。
+    // 这样画布里修改/删除系统提示词会实时同步，不再依赖各端不互通的 localStorage 覆盖。
+    // 仍保留 builtin:true 用于“内置”标签与完整提示词（含负向/参数）的展示。
+    const source = Array.isArray(activeLibrary.items) && activeLibrary.items.length ? activeLibrary.items : builtinPromptTemplates;
+    const builtins = source
+        .filter(t => t?.id && t?.positive)
+        .map(t => ({...t, sourceId:t.id, builtin:true, remote:true, libraryId:'system'}));
     const mine = promptPresets.map(p => ({
         id:`mine:${p.id}`,
         sourceId:p.id,
         name:p.name || tr('smart.promptPresetUnnamed'),
-        category:p.category || 'mine',
+        // 系统库分组以后端为准（custom=“我的”），本地旧预设归到 custom 分组下展示，避免无对应标签。
+        category:(p.category && p.category !== 'mine') ? p.category : 'custom',
         scene:'我的提示词预设',
         positive:p.text || '',
         negative:'',
@@ -2838,21 +3186,24 @@ function promptTemplateSearchText(template){
 }
 function activePromptTemplateGroups(){
     const lib = activePromptLibrary();
+    // 系统库的分组也以后端 categories 为准，与素材库管理共用同一份分组数据（可重命名/删除并同步）。
+    const fromLib = Array.isArray(lib?.categories) ? lib.categories.filter(c => c?.id && c?.name) : [];
+    if(fromLib.length) return fromLib;
     if(!lib || lib.id === 'system') return promptTemplateGroups;
-    return Array.isArray(lib.categories) ? lib.categories.filter(c => c?.id && c?.name) : [];
+    return [];
 }
 function promptTemplateCategoryLabel(category){
     if(category === 'all') return tr('smart.tplAll');
-    const lib = activePromptLibrary();
-    if(lib && lib.id !== 'system'){
-        return activePromptTemplateGroups().find(g => g.id === category)?.name || category;
-    }
+    // 分组名优先以后端 categories 为准（含内置分组重命名），保证两端显示一致。
+    const fromGroups = activePromptTemplateGroups().find(g => g.id === category)?.name;
+    if(fromGroups) return fromGroups;
     const builtin = {
         view:tr('smart.tplCatView'),
         storyboard:tr('smart.tplCatStoryboard'),
         character:tr('smart.tplCatCharacter'),
         product:tr('smart.tplCatProduct'),
         lighting:tr('smart.tplCatLighting'),
+        custom:tr('smart.tplCatMine'),
         mine:tr('smart.tplCatMine')
     };
     return builtin[category] || promptTemplateGroups.find(g => g.id === category)?.name || category;
@@ -2982,6 +3333,8 @@ function renderPromptTemplatePanel(options={}){
     const query = String(promptTemplateSearch?.value || '').trim().toLowerCase();
     const allTemplates = promptTemplateItems();
     const activeGroups = activePromptTemplateGroups();
+    // 防御：若当前分类筛选不属于当前词库（例如刚切换词库或分类已被删除），回到“全部”，避免列表被过滤为空。
+    if(promptTemplateCategory !== 'all' && !activeGroups.some(g => g.id === promptTemplateCategory)) promptTemplateCategory = 'all';
     const categories = [{id:'all', name:tr('smart.tplAll')}, ...activeGroups.map(group => ({...group, name:promptTemplateCategoryLabel(group.id)}))];
     const groupCounts = allTemplates.reduce((map, item) => {
         map[item.category || 'mine'] = (map[item.category || 'mine'] || 0) + 1;
@@ -3001,13 +3354,13 @@ function renderPromptTemplatePanel(options={}){
             </div>
             <div class="prompt-template-group-list">
                 ${activeGroups.map(group => `
-                    <div class="prompt-template-group-row ${['view','storyboard','character','product','lighting','mine'].includes(group.id) ? '' : 'has-delete'}">
+                    <div class="prompt-template-group-row has-delete">
                         <button type="button" class="group-name ${group.id === promptTemplateCategory ? 'active' : ''}" data-template-cat="${escapeHtml(group.id)}">
                             <span>${escapeHtml(promptTemplateCategoryLabel(group.id))}</span>
                             <small>${groupCounts[group.id] || 0}</small>
                         </button>
                         <button type="button" class="group-tool" data-template-cat-edit="${escapeHtml(group.id)}" title="${escapeAttr(tr('smart.tplRename'))}"><i data-lucide="pencil"></i></button>
-                        ${['view','storyboard','character','product','lighting','mine'].includes(group.id) ? '' : `<button type="button" class="group-tool danger" data-template-cat-delete="${escapeHtml(group.id)}" title="${escapeAttr(tr('common.delete'))}"><i data-lucide="trash-2"></i></button>`}
+                        <button type="button" class="group-tool danger" data-template-cat-delete="${escapeHtml(group.id)}" title="${escapeAttr(tr('common.delete'))}"><i data-lucide="trash-2"></i></button>
                     </div>
                 `).join('')}
             </div>
@@ -3038,7 +3391,8 @@ function renderPromptTemplatePanel(options={}){
     const target = promptTemplatePanel.dataset.target || 'node';
     const node = nodes.find(n => n.id === promptTemplatePanel.dataset.nodeId);
     const activeLibrary = activePromptLibrary();
-    const canEditCurrentLibrary = activeLibrary.id !== 'system' && !activeLibrary.readonly;
+    // 系统库 readonly=false，其条目也可编辑/删除（经后端持久化），因此只看 readonly。
+    const canEditCurrentLibrary = !activeLibrary.readonly;
     const editMode = Boolean(promptTemplateEditing && selectedPreset);
     promptTemplateBody.innerHTML = `
         <div class="prompt-template-list">
@@ -3064,8 +3418,8 @@ function renderPromptTemplatePanel(options={}){
                     </div>
                     ${editMode ? '' : `
                         <div class="prompt-template-icon-actions">
-                            <button type="button" ${selected?.builtin || !canEditCurrentLibrary ? 'disabled' : ''} data-template-edit title="${escapeAttr(tr('smart.tplEditTemplate'))}"><i data-lucide="pencil"></i><span>${escapeHtml(tr('common.edit'))}</span></button>
-                            <button type="button" ${selected?.builtin || !canEditCurrentLibrary ? 'disabled' : ''} class="danger" data-template-delete title="${escapeAttr(tr('smart.tplDeleteTemplate'))}"><i data-lucide="trash-2"></i><span>${escapeHtml(tr('common.delete'))}</span></button>
+                            <button type="button" ${!canEditCurrentLibrary ? 'disabled' : ''} data-template-edit title="${escapeAttr(tr('smart.tplEditTemplate'))}"><i data-lucide="pencil"></i><span>${escapeHtml(tr('common.edit'))}</span></button>
+                            <button type="button" ${!canEditCurrentLibrary ? 'disabled' : ''} class="danger" data-template-delete title="${escapeAttr(tr('smart.tplDeleteTemplate'))}"><i data-lucide="trash-2"></i><span>${escapeHtml(tr('common.delete'))}</span></button>
                         </div>
                     `}
                 </div>
@@ -3121,16 +3475,20 @@ function syncComposerTemplateButton(){
     composerTemplateBtn.classList.toggle('active', active);
     composerTemplateBtn.setAttribute('aria-pressed', active ? 'true' : 'false');
 }
-function openPromptTemplatePanel(nodeId='', templateId='', options={}){
+async function openPromptTemplatePanel(nodeId='', templateId='', options={}){
     if(!promptTemplatePanel) return;
     const target = options.target === 'composer' ? 'composer' : 'node';
     promptTemplatePanel.dataset.target = target;
     promptTemplatePanel.dataset.nodeId = nodeId || '';
     if(promptTemplatePanel.parentElement !== shell) shell.appendChild(promptTemplatePanel);
     if(templateId) promptTemplateSelectedId = templateId;
-    if(!promptTemplateSelectedId) promptTemplateSelectedId = promptTemplateItems()[0]?.id || '';
-    renderPromptTemplatePanel();
     promptTemplatePanel.classList.add('open');
+    // 每次打开都从后端拉取最新提示词库，确保素材库管理里的新增/修改/删除实时反映到画布（同根同源）。
+    try { await loadPromptTemplates(); } catch(e){}
+    if(!promptTemplateSelectedId || !promptTemplateItems().some(it => it.id === promptTemplateSelectedId)){
+        promptTemplateSelectedId = promptTemplateItems()[0]?.id || '';
+    }
+    renderPromptTemplatePanel();
     if(target === 'node' && nodeId){
         selectedId = nodeId;
         selectedIds = [];
@@ -3168,7 +3526,8 @@ function applyPromptTemplateToNode(mode='positive'){
 }
 async function saveCurrentPromptAsTemplate(){
     const library = activePromptLibrary();
-    if(library.id === 'system' || library.readonly){ toast('请选择可编辑的提示词库'); return; }
+    // 系统库 readonly=false，也允许新增条目（走后端，与素材库管理同步）。
+    if(library.readonly){ toast('请选择可编辑的提示词库'); return; }
     const text = promptTemplatePanel?.dataset.target === 'composer'
         ? promptPlainText()
         : String(nodes.find(n => n.id === promptTemplatePanel?.dataset.nodeId)?.text || '').trim();
@@ -3177,14 +3536,14 @@ async function saveCurrentPromptAsTemplate(){
         const data = await fetch('/api/prompt-libraries/items', {
             method:'POST',
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({library_id:library.id, name:defaultPromptPresetName(text), category:promptTemplateCategory === 'all' ? 'mine' : promptTemplateCategory, positive:text, scene:'我的提示词预设'})
+            body:JSON.stringify({library_id:library.id, name:defaultPromptPresetName(text), category:promptTemplateCategory === 'all' ? 'custom' : promptTemplateCategory, positive:text, scene:'我的提示词预设'})
         }).then(async r => {
             if(!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || '保存失败');
             return r.json();
         });
         promptLibraries = data.library?.libraries || promptLibraries;
         activePromptLibraryId = library.id;
-        promptTemplateCategory = data.item?.category || 'mine';
+        promptTemplateCategory = data.item?.category || 'custom';
         promptTemplateSelectedId = data.item?.id || '';
         promptTemplateEditing = true;
         renderPromptTemplatePanel({preserveScroll:false});
@@ -3194,8 +3553,9 @@ async function saveCurrentPromptAsTemplate(){
 }
 async function createBlankPromptTemplate(){
     const library = activePromptLibrary();
-    if(library.id === 'system' || library.readonly){ toast('请选择可编辑的提示词库'); return; }
-    const category = promptTemplateCategory && promptTemplateCategory !== 'all' ? promptTemplateCategory : 'mine';
+    // 系统库 readonly=false，也允许新建空白条目（走后端，与素材库管理同步）。
+    if(library.readonly){ toast('请选择可编辑的提示词库'); return; }
+    const category = promptTemplateCategory && promptTemplateCategory !== 'all' ? promptTemplateCategory : 'custom';
     try {
         const data = await fetch('/api/prompt-libraries/items', {
             method:'POST',
@@ -3292,7 +3652,8 @@ async function createPromptTemplateGroup(){
     const name = window.prompt(tr('smart.tplNewGroupPrompt'), tr('smart.tplNewGroupDefault'));
     if(!String(name || '').trim()) return;
     const lib = activePromptLibrary();
-    if(lib && lib.id !== 'system'){
+    // 系统库（readonly=false）也走后端新增分组，与素材库管理同步。
+    if(lib && !lib.readonly){
         try {
             const data = await fetch('/api/prompt-libraries/categories', {
                 method:'POST', headers:{'Content-Type':'application/json'},
@@ -3316,7 +3677,8 @@ async function renamePromptTemplateGroup(groupId){
     if(!group) return;
     const name = window.prompt(tr('smart.tplGroupNamePrompt'), group.name || '');
     if(!String(name || '').trim()) return;
-    if(lib && lib.id !== 'system'){
+    // 系统库的内置分组也走后端重命名（后端已放开内置分组限制），两端同步。
+    if(lib && !lib.readonly){
         try {
             const data = await fetch(`/api/prompt-libraries/categories/${encodeURIComponent(groupId)}`, {
                 method:'PATCH', headers:{'Content-Type':'application/json'},
@@ -3333,7 +3695,8 @@ async function renamePromptTemplateGroup(groupId){
 }
 async function deletePromptTemplateGroup(groupId){
     const lib = activePromptLibrary();
-    if(lib && lib.id !== 'system'){
+    // 系统库的内置分组也走后端删除（后端已放开限制并把孤立条目改挂到剩余分组），两端同步。
+    if(lib && !lib.readonly){
         if(!window.confirm(tr('smart.tplDeleteGroupConfirm'))) return;
         try {
             const data = await fetch(`/api/prompt-libraries/categories/${encodeURIComponent(groupId)}`, {method:'DELETE'})
@@ -3342,10 +3705,6 @@ async function deletePromptTemplateGroup(groupId){
             if(promptTemplateCategory === groupId) promptTemplateCategory = 'all';
             renderPromptTemplatePanel({preserveScroll:false});
         } catch(err){ if(typeof setStatus === 'function') setStatus(err.message || '删除失败'); }
-        return;
-    }
-    if(['view','storyboard','character','product','lighting','mine'].includes(groupId)){
-        renamePromptTemplateGroup(groupId);
         return;
     }
     if(!window.confirm(tr('smart.tplDeleteGroupConfirm'))) return;
@@ -3367,10 +3726,41 @@ function assetCategories(type='image'){
     const library = activeAssetLibrary();
     return (library?.categories || assetLibrary.categories || []).filter(cat => (cat.type || 'image') === type);
 }
+function workflowAssetCategories(){
+    return assetCategories('workflow');
+}
 function assetLibraries(){
     return Array.isArray(assetLibrary.libraries) && assetLibrary.libraries.length ? assetLibrary.libraries : [{id:'default', name:'默认资产库', categories:assetLibrary.categories || []}];
 }
+function localAssetFolderCategories(){
+    const result = [];
+    const walk = node => {
+        if(!node) return;
+        const isRoot = (node.id || node.path || '__root__') === '__root__';
+        result.push({
+            id: node.id || (node.path ? node.path : '__root__'),
+            name: node.name || (node.path ? node.path.split('/').pop() : '全部上传'),
+            type: 'image',
+            items: (isRoot ? (localAssetLibrary.items || []) : (node.items || [])).filter(item => assetMediaKind(item) === 'image'),
+            readonly: true,
+            source: 'local',
+        });
+        (node.children || []).forEach(walk);
+    };
+    walk(localAssetLibrary.tree || {id:'__root__', name:'全部上传', items:localAssetLibrary.items || [], children:[]});
+    return result.filter(cat => cat.id === '__root__' || cat.items.length || (localAssetLibrary.tree?.children || []).length);
+}
+function assetLibraryIsLocal(){
+    return activeAssetLibraryId === LOCAL_ASSET_LIBRARY_ID;
+}
+function currentAssetSourceLibraries(){
+    return [
+        ...assetLibraries(),
+        {id:LOCAL_ASSET_LIBRARY_ID, name:'本地素材', categories:localAssetFolderCategories(), readonly:true, source:'local'}
+    ];
+}
 function activeAssetLibrary(){
+    if(assetLibraryIsLocal()) return currentAssetSourceLibraries().find(lib => lib.id === LOCAL_ASSET_LIBRARY_ID);
     const libs = assetLibraries();
     return libs.find(lib => lib.id === activeAssetLibraryId) || libs[0] || null;
 }
@@ -3379,9 +3769,31 @@ function activeAssetCategory(){
     if(!cats.length) return null;
     return cats.find(cat => cat.id === activeAssetCategoryId) || cats[0];
 }
+function activeWorkflowAssetCategory(){
+    const cats = workflowAssetCategories();
+    if(!cats.length) return null;
+    return cats.find(cat => cat.id === activeWorkflowAssetCategoryId) || cats[0];
+}
+function currentAssetTabIsWorkflow(){
+    return assetTab === 'workflow';
+}
+function currentAssetTabCategories(){
+    return currentAssetTabIsWorkflow() ? workflowAssetCategories() : assetCategories('image');
+}
+function activeAssetTabCategory(){
+    return currentAssetTabIsWorkflow() ? activeWorkflowAssetCategory() : activeAssetCategory();
+}
+function setActiveAssetTabCategory(categoryId=''){
+    if(currentAssetTabIsWorkflow()) activeWorkflowAssetCategoryId = categoryId || '';
+    else activeAssetCategoryId = categoryId || '';
+}
 async function loadAssetLibrary(){
     try {
-        const data = await fetch('/api/asset-library').then(r => r.json());
+        const [data, localData] = await Promise.all([
+            fetch('/api/asset-library').then(r => r.json()),
+            fetch('/api/local-assets').then(r => r.ok ? r.json() : {items:[], tree:null}).catch(() => ({items:[], tree:null}))
+        ]);
+        localAssetLibrary = {items:Array.isArray(localData.items) ? localData.items : [], tree:localData.tree || null};
         setAssetLibraryFromResponse(data, {render:false});
         renderAssetLibrary();
     } catch(e) {
@@ -3561,10 +3973,13 @@ function setAssetLibraryFromResponse(data, options={}){
     assetLibraryUpdatedAt = Number(assetLibrary.updated_at || assetLibraryUpdatedAt || 0);
     const libs = assetLibraries();
     if(!activeAssetLibraryId) activeAssetLibraryId = assetLibrary.active_library_id || libs[0]?.id || '';
-    if(activeAssetLibraryId && !libs.some(lib => lib.id === activeAssetLibraryId)) activeAssetLibraryId = libs[0]?.id || '';
+    if(activeAssetLibraryId && activeAssetLibraryId !== LOCAL_ASSET_LIBRARY_ID && !libs.some(lib => lib.id === activeAssetLibraryId)) activeAssetLibraryId = libs[0]?.id || '';
     const cats = assetCategories('image');
     if(activeAssetCategoryId && !cats.some(cat => cat.id === activeAssetCategoryId)) activeAssetCategoryId = '';
     if(!activeAssetCategoryId) activeAssetCategoryId = activeAssetCategory()?.id || '';
+    const workflowCats = workflowAssetCategories();
+    if(activeWorkflowAssetCategoryId && !workflowCats.some(cat => cat.id === activeWorkflowAssetCategoryId)) activeWorkflowAssetCategoryId = '';
+    if(!activeWorkflowAssetCategoryId) activeWorkflowAssetCategoryId = activeWorkflowAssetCategory()?.id || '';
     if(mentionAssetCategoryId && !cats.some(cat => cat.id === mentionAssetCategoryId)) mentionAssetCategoryId = '';
     if(!mentionAssetCategoryId) mentionAssetCategoryId = activeAssetCategoryId;
     if(options.render !== false) {
@@ -3590,56 +4005,72 @@ function assetCategoryForMention(){
 }
 function assetMediaKind(item){
     if(!item) return 'image';
+    if(item.kind === 'workflow' || item.type === 'workflow') return 'workflow';
     if(item.kind === 'video' || item.type === 'video') return 'video';
     if(item.kind === 'audio' || item.type === 'audio') return 'audio';
     const url = String(item.url || item.thumbnail || '').toLowerCase().split('?')[0];
     const name = String(item.name || '').toLowerCase();
     if(/\.(mp4|webm|mov|m4v|avi|mkv)$/.test(url) || /\.(mp4|webm|mov|m4v|avi|mkv)$/.test(name)) return 'video';
     if(/\.(mp3|wav|m4a|aac|ogg|flac)$/.test(url) || /\.(mp3|wav|m4a|aac|ogg|flac)$/.test(name)) return 'audio';
+    if(/\.(json|zip)$/.test(url) || /\.(json|zip)$/.test(name)) return 'workflow';
     return 'image';
 }
 function assetThumbHtml(item){
     const url = escapeAttr(item.url || '');
-    const thumb = escapeAttr(item.thumbnail || item.thumb || item.preview || item.url || '');
+    const thumb = item.thumbnail || item.thumb || item.preview || item.url || '';
     const kind = assetMediaKind(item);
     if(kind === 'video'){
-        return `<div class="asset-thumb-wrap"><video class="asset-thumb" src="${url}" data-url="${url}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video><span class="asset-video-badge"><i data-lucide="film"></i>VIDEO</span></div>`;
+        return `<div class="asset-thumb-wrap">${smartVideoPreviewHtml(item, 512, 'class="asset-thumb" alt=""')}<span class="asset-video-badge"><i data-lucide="film"></i>VIDEO</span></div>`;
     }
     if(kind === 'audio'){
         return `<div class="asset-thumb-wrap media-thumb audio-thumb asset-thumb"><i data-lucide="file-audio"></i><span>${escapeHtml(item.name || 'Audio')}</span></div>`;
     }
-    return `<img class="asset-thumb" src="${thumb}" alt="">`;
+    if(kind === 'workflow'){
+        return `<div class="asset-thumb-wrap media-thumb workflow-thumb asset-thumb"><i data-lucide="workflow"></i><span>${escapeHtml(item.name || 'Workflow')}</span></div>`;
+    }
+    return smartPreviewImgHtml({...item, url:thumb}, 512, 'class="asset-thumb" alt=""');
 }
 function renderAssetLibrary(){
     if(!assetPanel || !assetGrid || !assetCategorySelect) return;
     document.querySelectorAll('[data-asset-tab]').forEach(btn => btn.classList.toggle('active', btn.dataset.assetTab === assetTab));
-    const libs = assetLibraries();
-    if(!activeAssetLibraryId || !libs.some(lib => lib.id === activeAssetLibraryId)) activeAssetLibraryId = libs[0]?.id || '';
+    const libs = currentAssetSourceLibraries();
+    if(!activeAssetLibraryId || !libs.some(lib => lib.id === activeAssetLibraryId)) activeAssetLibraryId = assetLibrary.active_library_id || assetLibraries()[0]?.id || LOCAL_ASSET_LIBRARY_ID;
     if(assetLibrarySelect){
         assetLibrarySelect.innerHTML = libs.map(lib => `<option value="${escapeHtml(lib.id)}" ${lib.id === activeAssetLibraryId ? 'selected' : ''}>${escapeHtml(lib.name || '资产库')}</option>`).join('');
     }
     const imageMode = assetTab === 'image';
-    assetImageControls.style.display = imageMode ? 'block' : 'none';
-    assetDropZone.style.display = imageMode ? 'flex' : 'none';
-    assetGrid.style.display = imageMode ? 'grid' : 'none';
-    workflowEmpty.style.display = imageMode ? 'none' : 'flex';
-    if(!imageMode){ refreshIcons(); return; }
-    const cats = assetCategories('image');
-    if(!cats.some(cat => cat.id === activeAssetCategoryId)) activeAssetCategoryId = cats[0]?.id || '';
-    assetCategorySelect.innerHTML = cats.map(cat => `<option value="${escapeHtml(cat.id)}" ${cat.id === activeAssetCategoryId ? 'selected' : ''}>${escapeHtml(cat.name || tr('smart.assetFolder'))}</option>`).join('');
-    const cat = activeAssetCategory();
+    const workflowMode = assetTab === 'workflow';
+    assetImageControls.style.display = (imageMode || workflowMode) ? 'block' : 'none';
+    const localMode = assetLibraryIsLocal();
+    assetDropZone.style.display = (imageMode && !localMode) ? 'flex' : 'none';
+    assetGrid.style.display = (imageMode || workflowMode) ? 'grid' : 'none';
+    workflowEmpty.style.display = 'none';
+    if(!imageMode && !workflowMode){ refreshIcons(); return; }
+    const cats = workflowMode ? workflowAssetCategories() : assetCategories('image');
+    const activeCatId = workflowMode ? activeWorkflowAssetCategoryId : activeAssetCategoryId;
+    if(workflowMode && !cats.some(cat => cat.id === activeWorkflowAssetCategoryId)) activeWorkflowAssetCategoryId = cats[0]?.id || '';
+    if(imageMode && !cats.some(cat => cat.id === activeAssetCategoryId)) activeAssetCategoryId = cats[0]?.id || '';
+    assetCategorySelect.innerHTML = cats.map(cat => `<option value="${escapeHtml(cat.id)}" ${cat.id === (workflowMode ? activeWorkflowAssetCategoryId : activeAssetCategoryId) ? 'selected' : ''}>${escapeHtml(cat.name || (workflowMode ? '工作流' : tr('smart.assetFolder')))}</option>`).join('');
+    const cat = workflowMode ? activeWorkflowAssetCategory() : activeAssetCategory();
     const items = cat?.items || [];
+    if(assetAddCategoryBtn) assetAddCategoryBtn.disabled = localMode;
+    if(assetRenameCategoryBtn) assetRenameCategoryBtn.disabled = !cat || localMode;
     assetGrid.innerHTML = items.length ? items.map(item => `
-        <div class="asset-item" draggable="true" data-asset-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-name="${escapeHtml(item.name || 'asset')}" data-kind="${escapeHtml(assetMediaKind(item))}">
+        <div class="asset-item ${workflowMode ? 'workflow-asset-item' : ''}" draggable="${workflowMode ? 'false' : 'true'}" data-asset-id="${escapeHtml(item.id)}" data-url="${escapeHtml(item.url)}" data-name="${escapeHtml(item.name || 'asset')}" data-kind="${escapeHtml(assetMediaKind(item))}">
             ${assetThumbHtml(item)}
             <div class="asset-meta">
                 <span class="asset-name" title="${escapeHtml(item.name || '')}">${escapeHtml(item.name || 'asset')}</span>
-                <button class="asset-mini-btn" type="button" data-rename-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('smart.assetRename'))}"><i data-lucide="pencil"></i></button>
-                <button class="asset-mini-btn" type="button" data-delete-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('common.delete'))}"><i data-lucide="trash-2"></i></button>
+                ${workflowMode
+                    ? `<button class="asset-mini-btn" type="button" data-rename-workflow-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('smart.assetRename'))}"><i data-lucide="pencil"></i></button>
+                       <button class="asset-mini-btn" type="button" data-delete-workflow-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('common.delete'))}"><i data-lucide="trash-2"></i></button>`
+                    : localMode ? `<span class="asset-local-tag">本地</span>` : `<button class="asset-mini-btn" type="button" data-rename-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('smart.assetRename'))}"><i data-lucide="pencil"></i></button>
+                       <button class="asset-mini-btn" type="button" data-delete-asset="${escapeHtml(item.id)}" title="${escapeHtml(tr('common.delete'))}"><i data-lucide="trash-2"></i></button>`}
             </div>
         </div>
-    `).join('') : `<div class="asset-empty">${escapeHtml(tr('smart.assetEmpty'))}</div>`;
-    bindAssetItemEvents();
+    `).join('') : `<div class="asset-empty">${escapeHtml(localMode ? '暂无本地素材，请在素材库管理中上传' : (workflowMode ? '暂无工作流资产' : tr('smart.assetEmpty')))}</div>`;
+    if(workflowMode) bindWorkflowAssetItemEvents();
+    else bindAssetItemEvents();
+    bindSmartPreviewImageFallbacks(assetGrid);
     refreshIcons();
 }
 function openAssetNameDialog({title='', value='', placeholder='', cancelValue='', multiline=false }={}){
@@ -3731,12 +4162,14 @@ function hideAssetHoverPreview(){
     media?.load?.();
 }
 function beginAssetInlineRename(assetId){
-    const item = (activeAssetCategory()?.items || []).find(x => x.id === assetId);
+    const item = (activeAssetCategory()?.items || []).find(x => x.id === assetId)
+        || (activeWorkflowAssetCategory()?.items || []).find(x => x.id === assetId);
     const card = [...assetGrid.querySelectorAll('.asset-item')].find(el => el.dataset.assetId === assetId);
     const nameEl = card?.querySelector('.asset-name');
     if(!item || !card || !nameEl || card.querySelector('.asset-rename-input')) return;
     hideAssetHoverPreview();
     const previousName = item.name || 'asset';
+    const previousDraggable = card.draggable;
     const input = document.createElement('input');
     input.className = 'asset-rename-input';
     input.type = 'text';
@@ -3749,7 +4182,7 @@ function beginAssetInlineRename(assetId){
     let done = false;
     const restore = () => {
         if(input.isConnected) input.replaceWith(nameEl);
-        card.draggable = true;
+        card.draggable = previousDraggable;
     };
     const finish = async save => {
         if(done) return;
@@ -3816,7 +4249,33 @@ function bindAssetItemEvents(){
         };
     });
 }
+function bindWorkflowAssetItemEvents(){
+    assetGrid.querySelectorAll('[data-rename-workflow-asset]').forEach(btn => {
+        btn.onclick = async e => {
+            e.preventDefault();
+            e.stopPropagation();
+            beginAssetInlineRename(btn.dataset.renameWorkflowAsset);
+        };
+    });
+    assetGrid.querySelectorAll('[data-delete-workflow-asset]').forEach(btn => {
+        btn.onclick = async e => {
+            e.preventDefault();
+            e.stopPropagation();
+            const item = (activeWorkflowAssetCategory()?.items || []).find(x => x.id === btn.dataset.deleteWorkflowAsset);
+            if(!item) return;
+            btn.disabled = true;
+            try {
+                const data = await fetch(`/api/asset-library/items/${encodeURIComponent(item.id)}`, {method:'DELETE'}).then(r => r.json());
+                setAssetLibraryFromResponse(data);
+            } catch(err){
+                btn.disabled = false;
+                toast(err.message || tr('smart.assetAddFail'));
+            }
+        };
+    });
+}
 async function addUrlToAssetLibrary(url, name=''){
+    if(assetLibraryIsLocal()){ toast('本地素材请在素材库管理中上传'); return; }
     const cat = activeAssetCategory();
     if(!cat){ toast(tr('smart.assetNoFolder')); return; }
     const data = await fetch('/api/asset-library/items', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeAssetLibraryId, category_id:cat.id, url, name})}).then(async r => {
@@ -3838,6 +4297,7 @@ async function loadCanvas(){
         if(!res.ok) return;
         const data = await res.json();
         canvas = data.canvas;
+        canvasUsesConnections = Object.prototype.hasOwnProperty.call(canvas || {}, 'connections');
         document.title = canvas.title || tr('canvas.smartCanvas');
         document.getElementById('smartTitle').textContent = canvas.title || tr('canvas.smartCanvas');
         nodes = (Array.isArray(canvas.nodes) ? canvas.nodes : []).map(normalizeLegacySmartNode).filter(Boolean);
@@ -3851,6 +4311,7 @@ async function loadCanvas(){
             }
         });
         canvas.connections = Array.isArray(canvas.connections) ? canvas.connections : [];
+        const cleanedDetachedInputs = cleanupDetachedRunInputRefs();
         viewport = {...viewport, ...(canvas.viewport || {})};
         viewport.scale = safeScale(viewport.scale);
         if(canvas.settings) settings = {...settings, ...canvas.settings};
@@ -3861,6 +4322,7 @@ async function loadCanvas(){
         updateProviderModels();
         applyViewport();
         render();
+        if(cleanedDetachedInputs) scheduleSave();
         resumeSmartPendingTasks();
         resumeJimengPendingNodes();
         startCanvasMetaPoll();
@@ -4049,6 +4511,45 @@ function pasteNodes(){
     render();
     scheduleSave();
 }
+// 跨页"素材库 → 画布"剪贴板：素材库管理页把所选素材写进这个 localStorage key，
+// 画布里按 Ctrl+V 读取并批量生成图片节点（网格平铺），用完即清空（一次性）。
+const SMART_CANVAS_ASSET_INBOX_KEY = 'smart_canvas_asset_inbox';
+function readAssetInbox(){
+    try {
+        const data = JSON.parse(localStorage.getItem(SMART_CANVAS_ASSET_INBOX_KEY) || 'null');
+        const items = Array.isArray(data?.items) ? data.items.filter(it => it && it.url) : [];
+        if(!items.length) return null;
+        if(data.ts && (Date.now() - Number(data.ts)) > 30 * 60 * 1000) return null; // 30 分钟内有效
+        return items;
+    } catch(e){ return null; }
+}
+function pasteAssetsFromInbox(){
+    const items = readAssetInbox();
+    if(!items) return false;
+    const center = lastMouseWorld || viewportCenter();
+    const cell = 260; // 网格间距（世界坐标）
+    const cols = Math.max(1, Math.min(items.length, Math.ceil(Math.sqrt(items.length))));
+    const rows = Math.ceil(items.length / cols);
+    const startX = center.x - (cols - 1) * cell / 2;
+    const startY = center.y - (rows - 1) * cell / 2;
+    pushUndo();
+    const created = [];
+    items.forEach((it, i) => {
+        const r = Math.floor(i / cols), c = i % cols;
+        const p = {x: startX + c * cell, y: startY + r * cell};
+        const node = createImageNodeAt(p, [{url: it.url, name: it.name || 'asset', kind: it.kind || assetMediaKind(it)}], {skipUndo:true, select:false});
+        if(node) created.push(node.id);
+    });
+    selectedId = created.length === 1 ? created[0] : '';
+    selectedIds = created.length > 1 ? created : [];
+    selectedImage = {nodeId:'', index:-1};
+    lastNodePasteAt = Date.now();
+    try { localStorage.removeItem(SMART_CANVAS_ASSET_INBOX_KEY); } catch(e){}
+    render();
+    scheduleSave();
+    toast(`已粘贴 ${created.length} 个素材到画布`);
+    return true;
+}
 function duplicateForAltDrag(node){
     const ids = (isNodeSelected(node.id) ? selectedNodeIds() : [node.id]);
     const sourceNodes = ids.map(id => nodes.find(n => n.id === id)).filter(Boolean);
@@ -4179,6 +4680,12 @@ function updateNodeElementDuringResize(node){
         if(grid){
             grid.style.setProperty('--thumb-cols', layout.cols);
             grid.style.setProperty('--thumb-size', `${layout.thumb}px`);
+            const visibleRows = Math.max(1, Math.min(MEDIA_GROUP_MAX_VISIBLE_ROWS, Number(layout.visibleRows || layout.rows || 1)));
+            const maxHeight = visibleRows * Number(layout.thumb || 96) + Math.max(0, visibleRows - 1) * 8;
+            grid.style.setProperty('--thumb-max-height', `${maxHeight}px`);
+            grid.querySelectorAll('.thumb-item').forEach((itemEl, index) => {
+                applyThumbDisplaySizeToElement(itemEl, imgs[index], layout.thumb);
+            });
         }
         const wrap = body.querySelector('.image-wrap');
         if(wrap){
@@ -4201,6 +4708,9 @@ function isVideoMediaItem(img){
     if(img.kind === 'video') return true;
     const url = String(img.url || '').toLowerCase();
     return /\.(mp4|webm|mov|m4v)(\?|$)/.test(url);
+}
+function isInlineVideoActive(img){
+    return Boolean(img && img._inlineVideoActive);
 }
 function isAudioMediaItem(img){
     if(!img) return false;
@@ -4271,7 +4781,14 @@ function resultMediaUrls(result){
         if(typeof value === 'object'){
             if(value.url || value.path || value.src || value.uri){
                 const url = value.url || value.path || value.src || value.uri;
-                if(url) urls.push({url, kind:value.kind || value.type || value.mediaKind || '', name:value.name || value.filename || ''});
+                if(url){
+                    const item = {url, kind:value.kind || value.type || value.mediaKind || '', name:value.name || value.filename || ''};
+                    ['natural_w','natural_h','width','height','w','h','layout_w','layout_h'].forEach(key => {
+                        const n = Number(value[key]);
+                        if(Number.isFinite(n) && n > 0) item[key] = n;
+                    });
+                    urls.push(item);
+                }
             }
             ['outputs','videos','images','urls','data','result'].forEach(key => add(value[key]));
             ['url','path','src','uri','output','output_url','outputUrl','video','video_url','videoUrl','mp4_url','mp4Url','download_url','downloadUrl','preview_url','previewUrl'].forEach(key => add(value[key]));
@@ -4319,8 +4836,8 @@ function audioRefsOnly(refs){
 function thumbMediaHtml(img){
     if(isFileMediaItem(img) || isTextMediaItem(img)) return `<div class="media-thumb file-thumb" data-media-url="${escapeAttr(img.url || '')}" data-media-kind="${escapeAttr(mediaKindForItem(img))}"><i data-lucide="${isTextMediaItem(img) ? 'file-text' : 'file'}"></i><span>${escapeHtml(img.name || (isTextMediaItem(img) ? 'Text' : 'File'))}</span></div>`;
     if(isAudioMediaItem(img)) return `<div class="media-thumb audio-thumb" data-media-url="${escapeAttr(img.url || '')}" data-media-kind="audio"><i data-lucide="file-audio"></i><span>${escapeHtml(img.name || 'Audio')}</span></div>`;
-    if(isVideoMediaItem(img)) return `<div class="media-thumb video-thumb"><video src="${escapeHtml(img.url)}" data-url="${escapeHtml(img.url)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video></div>`;
-    return `<img src="${escapeHtml(displayMediaUrl(img))}" data-original-src="${escapeAttr(img.url || '')}" draggable="false">`;
+    if(isVideoMediaItem(img)) return `<div class="media-thumb video-thumb">${isInlineVideoActive(img) ? smartVideoPlayerHtml(img.url || '') : `${smartVideoPreviewHtml(img, 512, 'alt=""')}<button class="smart-video-play thumb-video-play" type="button" title="播放"><i data-lucide="play"></i></button>`}</div>`;
+    return smartPreviewImgHtml(img, 512, 'draggable="false"');
 }
 function imageResolutionLabel(img){
     const w = Number(img?.natural_w || img?.width || img?.w || 0);
@@ -4333,8 +4850,9 @@ function imageResolutionBadgeHtml(img){
 }
 function thumbDisplaySize(img, maxSize){
     const limit = Math.max(28, Math.round(Number(maxSize) || 96));
-    const w = Number(img?.natural_w || img?.width || img?.w || 0);
-    const h = Number(img?.natural_h || img?.height || img?.h || 0);
+    const size = mediaLayoutSize(img);
+    const w = size.width;
+    const h = size.height;
     if(!(w > 0 && h > 0)) return {width:limit, height:limit};
     const fit = Math.min(limit / w, limit / h);
     return {
@@ -4361,14 +4879,29 @@ function applyThumbDisplaySizeToElement(itemEl, img, maxSize=0){
     itemEl.style.setProperty('--thumb-w', `${size.width}px`);
     itemEl.style.setProperty('--thumb-h', `${size.height}px`);
 }
+function updateImageResolutionBadgeElement(itemEl, img){
+    if(!itemEl) return;
+    const label = imageResolutionLabel(img);
+    let badge = itemEl.querySelector('.image-resolution-badge');
+    if(!label){
+        badge?.remove();
+        return;
+    }
+    if(!badge){
+        badge = document.createElement('span');
+        badge.className = 'image-resolution-badge';
+        itemEl.appendChild(badge);
+    }
+    badge.textContent = label;
+}
 function singleMediaHtml(img, w, h){
     if(isFileMediaItem(img) || isTextMediaItem(img)) return `<div class="node-img media-card media-file-card" style="width:${w}px;height:${h}px"><div class="media-card-icon"><i data-lucide="${isTextMediaItem(img) ? 'file-text' : 'file'}"></i></div><div class="media-card-title">${escapeHtml(img.name || (isTextMediaItem(img) ? 'Text' : 'File'))}</div><div class="media-card-sub">${isTextMediaItem(img) ? 'TEXT' : 'FILE'}</div></div>`;
     if(isAudioMediaItem(img)) return `<div class="node-img media-card media-audio-card" style="width:${w}px;height:${h}px"><div class="media-card-icon"><i data-lucide="file-audio"></i></div><div class="media-card-title">${escapeHtml(img.name || 'Audio')}</div><div class="media-card-sub">AUDIO</div><audio src="${escapeAttr(img.url || '')}" data-url="${escapeAttr(img.url || '')}" controls preload="metadata"></audio></div>`;
-    if(isVideoMediaItem(img)) return `<div class="node-img media-card media-video-card" style="width:${w}px;height:${h}px"><video src="${escapeHtml(img.url)}" data-url="${escapeHtml(img.url)}" controls muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video></div>`;
-    return `<img class="node-img" src="${escapeHtml(displayMediaUrl(img))}" data-original-src="${escapeAttr(img.url || '')}" draggable="false" style="width:${w}px;height:${h}px">`;
+    if(isVideoMediaItem(img)) return `<div class="node-img media-card media-video-card" style="width:${w}px;height:${h}px">${isInlineVideoActive(img) ? smartVideoPlayerHtml(img.url || '') : `${smartVideoPreviewHtml(img, 768, 'alt=""')}<button class="smart-video-play" type="button" title="播放"><i data-lucide="play"></i></button>`}</div>`;
+    return smartPreviewImgHtml(img, 768, `class="node-img" draggable="false" style="width:${w}px;height:${h}px"`);
 }
 function smartNodeHasLiveMedia(node){
-    return Boolean(!node?.pending && (node?.images || []).some(img => isVideoMediaItem(img) || isAudioMediaItem(img)));
+    return Boolean(!node?.pending && (node?.images || []).some(img => img?.url));
 }
 function mediaSignaturePartFromElement(itemEl){
     if(itemEl?.dataset?.mediaSignature) return itemEl.dataset.mediaSignature;
@@ -4414,17 +4947,28 @@ function transplantSmartMediaElements(oldNodeEl, newNodeEl){
     const oldItems = [...(oldNodeEl?.querySelectorAll?.('.thumb-item,.image-wrap') || [])];
     const newItems = [...(newNodeEl?.querySelectorAll?.('.thumb-item,.image-wrap') || [])];
     oldItems.forEach((oldItem, index) => {
-        const oldMedia = oldItem.querySelector('video,audio');
+        const oldMedia = oldItem.querySelector('video,audio,img.node-img,.thumb-item > img,.media-thumb img');
         if(!oldMedia) return;
         const selector = oldMedia.tagName.toLowerCase();
-        const oldUrl = oldMedia.dataset?.url || oldMedia.getAttribute('src') || '';
+        const oldUrl = oldMedia.dataset?.url || oldMedia.dataset?.originalSrc || oldMedia.getAttribute('src') || '';
         const oldSignature = oldItem.dataset?.mediaSignature || `${selector}:${oldUrl}`;
         const newItem = newItems.find(item => item.dataset?.mediaSignature === oldSignature)
             || newItems.find(item => item.querySelector?.(selector)?.dataset?.url === oldUrl)
+            || newItems.find(item => item.querySelector?.(selector)?.dataset?.originalSrc === oldUrl)
+            || newItems.find(item => item.querySelector?.(selector)?.getAttribute?.('src') === oldMedia.getAttribute('src'))
             || newItems[index];
         const newMedia = newItem?.querySelector?.(selector);
-        const newUrl = newMedia?.dataset?.url || newMedia?.getAttribute?.('src') || '';
+        const newUrl = newMedia?.dataset?.url || newMedia?.dataset?.originalSrc || newMedia?.getAttribute?.('src') || '';
         if(!newMedia || oldUrl !== newUrl) return;
+        if(selector === 'img'){
+            oldMedia.className = newMedia.className;
+            oldMedia.draggable = false;
+            oldMedia.alt = newMedia.getAttribute('alt') || oldMedia.getAttribute('alt') || '';
+            oldMedia.style.cssText = newMedia.style.cssText;
+            oldMedia.dataset.originalSrc = newMedia.dataset?.originalSrc || oldMedia.dataset?.originalSrc || '';
+            newMedia.replaceWith(oldMedia);
+            return;
+        }
         const state = captureMediaPlaybackState(oldMedia);
         newMedia.replaceWith(oldMedia);
         restoreMediaPlaybackState(oldMedia, state);
@@ -4649,7 +5193,7 @@ function renderSmartCanvasLog(){
         const thumbs = (log.outputs || []).slice(0, 8).map(url => {
             const safe = escapeAttr(url);
             const kind = outputUrlLooksVideo(url) ? 'video' : 'image';
-            return kind === 'video' ? `<video src="${safe}" data-url="${safe}" data-kind="video" muted playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video>` : `<img src="${safe}" data-url="${safe}" data-kind="image" alt="output">`;
+            return kind === 'video' ? smartVideoPreviewHtml(url, 256, 'data-kind="video" alt="output"') : smartPreviewImgHtml(url, 256, 'data-kind="image" alt="output"');
         }).join('');
         const date = new Date(log.createdAt || Date.now()).toLocaleString(window.StudioI18n?.lang() === 'en' ? 'en-US' : 'zh-CN');
         const req = log.request || {};
@@ -4676,6 +5220,7 @@ function renderSmartCanvasLog(){
             <div class="log-thumbs">${thumbs}</div>
         </div>`;
     }).join('') : `<div class="log-empty">${escapeHtml(tr('canvas.noLogs'))}</div>`;
+    bindSmartPreviewImageFallbacks(smartLogList);
     smartLogList.querySelectorAll('[data-url]').forEach(el => {
         el.onclick = e => {
             e.stopPropagation();
@@ -4725,7 +5270,10 @@ function promptNodeBodyHtml(node){
         <div class="prompt-node-llm">
             <select class="prompt-node-control prompt-llm-provider">${chatProviderOptions(node.llmProvider)}</select>
             <select class="prompt-node-control prompt-llm-model">${chatModelOptions(node.llmModel, node.llmProvider)}</select>
-            <textarea class="prompt-node-control prompt-llm-instruction" placeholder="${escapeHtml(tr('smart.promptLlmInstructionPlaceholder'))}">${escapeHtml(node.llmInstruction || '')}</textarea>
+            <div class="prompt-llm-instruction-wrap">
+                <textarea class="prompt-node-control prompt-llm-instruction" placeholder="${escapeHtml(tr('smart.promptLlmInstructionPlaceholder'))}" style="height:${promptLlmInstructionHeight(node)}px">${escapeHtml(node.llmInstruction || '')}</textarea>
+                <div class="prompt-llm-instruction-resize prompt-node-control" data-llm-instruction-resize="1" title="拖动调整高度"><span></span></div>
+            </div>
             <div class="prompt-node-llm-actions">
                 <button class="prompt-node-run prompt-node-control" type="button" ${node.running ? 'disabled' : ''}><i data-lucide="${node.running ? 'loader-2' : 'play'}"></i><span>${node.running ? escapeHtml(tr('common.running')) : escapeHtml(tr('common.run'))}</span></button>
                 <button class="prompt-node-pill prompt-node-control prompt-system-toggle ${node.llmSystemEnabled ? 'active' : ''}" type="button"><i data-lucide="${node.llmSystemEnabled ? 'toggle-right' : 'toggle-left'}"></i><span>${escapeHtml(node.llmSystemEnabled ? tr('smart.promptLlmDisableSystem') : tr('smart.promptLlmEnableSystem'))}</span></button>
@@ -4872,6 +5420,10 @@ function nodeBodyHtml(node, layout){
     if(node.jimengPending && node.jimengPending.submitId && imgs.length === 0){
         return jimengPendingBodyHtml(node, layout);
     }
+    const recoverTask = smartRecoverableImageTask(node);
+    if(recoverTask && imgs.length === 0){
+        return imageTaskRecoverBodyHtml(node, recoverTask, layout);
+    }
     if(node.queued && imgs.length === 0 && !node.pending){
         return `<div class="loading-cell single queued" style="width:${layout.width}px;height:${layout.height}px"></div>`;
     }
@@ -4882,7 +5434,11 @@ function nodeBodyHtml(node, layout){
         const rows = Math.ceil(count / cols);
         return `<div class="loading-skeleton" style="grid-template-columns:repeat(${cols}, 1fr);grid-template-rows:repeat(${rows}, 1fr);width:${layout.width}px;height:${layout.height}px;padding:8px;box-sizing:border-box">${Array.from({length:count}).map(() => `<div class="loading-cell"></div>`).join('')}</div>`;
     }
-    if(imgs.length > 1) return `<div class="thumb-grid" style="--thumb-cols:${layout.cols}; --thumb-size:${layout.thumb}px">${imgs.map((img, i) => `<div class="thumb-item ${selectedImage.nodeId === node.id && selectedImage.index === i ? 'image-selected' : ''}" data-image-index="${i}" data-media-signature="${escapeAttr(`${mediaKindForItem(img)}:${img?.url || ''}`)}">${thumbMediaHtml(img)}${imageResolutionBadgeHtml(img)}<button class="mini-x image-delete" type="button" data-image-index="${i}" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button></div>`).join('')}</div>`;
+    if(imgs.length > 1){
+        const visibleRows = Math.max(1, Math.min(MEDIA_GROUP_MAX_VISIBLE_ROWS, Number(layout.visibleRows || layout.rows || 1)));
+        const maxHeight = visibleRows * Number(layout.thumb || 96) + Math.max(0, visibleRows - 1) * 8;
+        return `<div class="thumb-grid" data-thumb-scroll="1" style="--thumb-cols:${layout.cols}; --thumb-size:${layout.thumb}px; --thumb-max-height:${maxHeight}px">${imgs.map((img, i) => `<div class="thumb-item ${selectedImage.nodeId === node.id && selectedImage.index === i ? 'image-selected' : ''}" data-image-index="${i}" data-media-signature="${escapeAttr(`${mediaKindForItem(img)}:${img?.url || ''}`)}">${thumbMediaHtml(img)}${imageResolutionBadgeHtml(img)}<button class="mini-x image-delete" type="button" data-image-index="${i}" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button></div>`).join('')}</div>`;
+    }
     if(imgs[0]) return `<div class="image-wrap ${selectedImage.nodeId === node.id && selectedImage.index === 0 ? 'image-selected' : ''}" data-image-index="0" data-media-signature="${escapeAttr(`${mediaKindForItem(imgs[0])}:${imgs[0]?.url || ''}`)}" style="--node-img-w:${layout.width}px;--node-img-h:${layout.height}px">${singleMediaHtml(imgs[0], layout.width, layout.height)}${imageResolutionBadgeHtml(imgs[0])}<button class="mini-x image-delete" type="button" data-image-index="0" title="${escapeHtml(tr('smart.deleteImage'))}"><i data-lucide="trash-2"></i></button></div>`;
     return `<div class="node-drop" data-upload-action="files">
         <span class="upload-node-main"><i data-lucide="upload-cloud"></i></span>
@@ -4902,6 +5458,103 @@ function jimengPendingBodyHtml(node, layout){
             <button class="jimeng-pending-query" type="button" data-jimeng-query="${escapeAttr(node.id)}" ${querying ? 'disabled' : ''}><i data-lucide="${querying ? 'loader-2' : 'refresh-cw'}"></i><span>${querying ? '查询中…' : '查询结果'}</span></button>
         </div>
     </div>`;
+}
+function smartRecoverableImageTask(node){
+    return smartPendingTasks(node).find(task => task.failed && task.recoverTaskId) || null;
+}
+function imageTaskRecoverBodyHtml(node, task, layout){
+    const querying = Boolean(task.querying);
+    const failedCount = smartPendingTasks(node).filter(item => item.failed && item.recoverTaskId).length;
+    const title = querying ? '查询中' : '任务未丢失';
+    const sub = failedCount > 1 ? `还有 ${failedCount} 个任务可查询` : `任务 ID：${task.recoverTaskId || ''}`;
+    return `<div class="jimeng-pending-cell loading-cell single" style="width:${layout.width}px;height:${layout.height}px">
+        <div class="jimeng-pending-overlay">
+            <div class="jimeng-pending-spinner"><i data-lucide="${querying ? 'loader-2' : 'refresh-cw'}"></i></div>
+            <div class="jimeng-pending-text">${escapeHtml(title)}</div>
+            <div class="jimeng-pending-sub">${escapeHtml(sub)}</div>
+            <button class="jimeng-pending-query" type="button" data-image-task-query="${escapeAttr(node.id)}" data-task-id="${escapeAttr(task.taskId)}" ${querying ? 'disabled' : ''}><i data-lucide="${querying ? 'loader-2' : 'refresh-cw'}"></i><span>${querying ? '查询中…' : '查询结果'}</span></button>
+        </div>
+    </div>`;
+}
+function smartNodeToolbarImageIndex(node){
+    const images = node?.images || [];
+    if(selectedImage.nodeId === node?.id){
+        const index = Number(selectedImage.index);
+        if(Number.isFinite(index) && index >= 0 && index < images.length) return index;
+    }
+    return 0;
+}
+function smartNodeToolbarHtml(node){
+    const isImageNode = node?.type === 'smart-image' || !node?.type;
+    const images = node?.images || [];
+    if(!isImageNode || !images.some(img => img?.url)) return '';
+    const item = imageForDisplay(images[smartNodeToolbarImageIndex(node)] || images.find(img => img?.url));
+    if(!item?.url) return '';
+    const kind = mediaKindForItem(item);
+    const canEditImage = kind === 'image';
+    const imageCount = images.filter(img => mediaKindForItem(imageForDisplay(img)) === 'image' && imageForDisplay(img)?.url).length;
+    const gridLabel = imageCount > 1 ? '宫格拼接' : '宫格切分';
+    const actions = [
+        {key:'preview', icon:'eye', label:'预览', enabled:kind === 'image' || kind === 'video'},
+        {key:'crop', icon:'crop', label:'裁剪', enabled:canEditImage},
+        {key:'outpaint', icon:'expand', label:'扩图', enabled:canEditImage},
+        {key:'mask', icon:'brush', label:'遮罩', enabled:canEditImage},
+        {key:'brush', icon:'paintbrush', label:'画笔', enabled:canEditImage},
+        {key:'grid', icon:'grid-3x3', label:gridLabel, enabled:canEditImage},
+        {key:'download', icon:'download', label:'下载', enabled:true}
+    ];
+    return `<div class="smart-node-floating-menu" data-smart-node-menu="1">${actions.map(action => `
+        <button type="button" data-smart-node-action="${escapeAttr(action.key)}" data-node-id="${escapeAttr(node.id)}" ${action.enabled ? '' : 'disabled'} title="${escapeAttr(action.label)}">
+            <i data-lucide="${escapeAttr(action.icon)}"></i><span>${escapeHtml(action.label)}</span>
+        </button>`).join('')}</div>`;
+}
+function duplicateSmartNodeMediaToCanvas(node, imageIndex){
+    const source = node?.images?.[imageIndex];
+    const item = imageForDisplay(source);
+    if(!node || !item?.url){ toast('没有可导出到画布的素材'); return; }
+    pushUndo();
+    const rect = nodeRect(node);
+    const point = {x:rect.x + rect.width + 220, y:rect.y + rect.height / 2};
+    const copy = {...item};
+    const newNode = createImageNodeAt(point, [copy], {select:true, skipUndo:true});
+    selectedIds = [];
+    selectedImage = {nodeId:newNode.id, index:0};
+    render();
+    scheduleSave();
+    toast('已添加到画布');
+}
+function runSmartNodeToolbarAction(nodeId, action){
+    const node = nodes.find(n => n.id === nodeId);
+    if(!node) return;
+    const index = smartNodeToolbarImageIndex(node);
+    const item = imageForDisplay(node.images?.[index]);
+    if(!item?.url) return;
+    const kind = mediaKindForItem(item);
+    selectedId = nodeId;
+    selectedIds = [];
+    selectedImage = {nodeId, index};
+    if(action === 'download'){
+        downloadPreviewFile(node.images?.[index] || item);
+        return;
+    }
+    if(action === 'canvas'){
+        duplicateSmartNodeMediaToCanvas(node, index);
+        return;
+    }
+    if(kind !== 'image' && action !== 'preview'){
+        toast('当前素材不支持该操作');
+        return;
+    }
+    if(action === 'preview'){
+        openImagePreview(nodeId, index);
+        return;
+    }
+    const modeMap = {crop:'crop', outpaint:'outpaint', mask:'mask', brush:'brush', grid:'grid'};
+    openImageEditor(nodeId, index);
+    setImageEditMode(modeMap[action] || 'preview', true);
+    if(action === 'grid' && canGridJoinCurrentNode()){
+        setGridOperationMode('join');
+    }
 }
 function nowMs(){ return Date.now(); }
 function formatRunDuration(ms){
@@ -4943,7 +5596,20 @@ function refreshRunTimerPills(){
     if(active && !runTimerInterval) runTimerInterval = setInterval(refreshRunTimerPills, 1000);
     if(!active && runTimerInterval){ clearInterval(runTimerInterval); runTimerInterval = null; }
 }
+function rememberInlineVideoActivations(){
+    world.querySelectorAll('.image-node [data-image-index] video[data-inline-video-active="1"]').forEach(video => {
+        const nodeEl = video.closest('.image-node');
+        const itemEl = video.closest('[data-image-index]');
+        const node = nodes.find(n => n.id === nodeEl?.dataset.id);
+        const index = Number(itemEl?.dataset.imageIndex ?? 0);
+        const image = node?.images?.[index];
+        if(image && mediaKindForItem(image) === 'video') image._inlineVideoActive = true;
+    });
+}
 function render(){
+    if(smartWorkflowTransferModal?.classList.contains('open')) updateSmartWorkflowTransferMeta();
+    rememberInlineVideoActivations();
+    world.classList.toggle('smart-multi-selected', selectedNodeIds().length > 1);
     const composerEl = composer;
     const mediaStates = captureMediaPlaybackStates();
     const reusableNodes = new Map();
@@ -4966,11 +5632,12 @@ function render(){
         const isGroup = isImageNode && imgs.length > 1;
         const isPending = ((node.pending || isQueued || isJimengPending) && imgs.length === 0);
         const body = nodeBodyHtml(node, layout);
-        const deleteBtn = `<button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button>`;
+        const deleteBtn = isGroup ? '' : `<button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button>`;
         const hint = isPending ? escapeHtml(tr('smart.hintPending')) : (imgs.length > 1 ? escapeHtml(tr('smart.hintMulti')) : imgs.length ? escapeHtml(tr('smart.hintSingle')) : escapeHtml(tr('smart.hintEmpty')));
         const html = `<div class="image-node ${isEmpty ? 'empty-node' : ''} ${isGroup ? 'group-node' : ''} ${isHistory ? 'history-group-node' : ''} ${isPrompt ? 'prompt-smart-node' : ''} ${isLoop ? 'loop-smart-node' : ''} ${isNodeSelected(node.id) ? 'selected' : ''} ${(dragState?.groupIds?.includes(node.id) || dragState?.id === node.id) ? 'dragging' : ''} ${node.running ? 'node-running' : ''} ${isPending ? 'node-pending' : ''}" data-id="${escapeHtml(node.id)}" style="left:${node.x || 0}px;top:${node.y || 0}px;width:${layout.width}px;height:${layout.height}px">
             <div class="node-head"><div class="node-title">${title}</div><div class="node-actions">${deleteBtn}</div></div>
-            ${!isEmpty ? `<div class="floating-node-actions"><button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button></div>` : ''}
+            ${!isEmpty && !isGroup ? `<div class="floating-node-actions"><button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button></div>` : ''}
+            ${smartNodeToolbarHtml(node)}
             ${runTimePillHtml(node)}
             <div class="node-body">${body}</div>
             <div class="node-hint">${hint}</div>
@@ -5011,6 +5678,7 @@ function render(){
     updateComposer();
     renderMinimap();
     if(window.lucide) lucide.createIcons();
+    bindSmartPreviewImageFallbacks(world);
     measureSmartNodeImages();
     refreshRunTimerPills();
     return;
@@ -5030,10 +5698,11 @@ function render(){
         const isGroup = isImageNode && imgs.length > 1;
         const isPending = (node.pending || isQueued) && imgs.length === 0;
         const body = nodeBodyHtml(node, layout);
-        const deleteBtn = `<button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button>`;
+        const deleteBtn = isGroup ? '' : `<button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button>`;
         return `<div class="image-node ${isEmpty ? 'empty-node' : ''} ${isGroup ? 'group-node' : ''} ${isPrompt ? 'prompt-smart-node' : ''} ${isLoop ? 'loop-smart-node' : ''} ${isNodeSelected(node.id) ? 'selected' : ''} ${(dragState?.groupIds?.includes(node.id) || dragState?.id === node.id) ? 'dragging' : ''} ${node.running ? 'node-running' : ''} ${isPending ? 'node-pending' : ''}" data-id="${escapeHtml(node.id)}" style="left:${node.x || 0}px;top:${node.y || 0}px;width:${layout.width}px;height:${layout.height}px">
             <div class="node-head"><div class="node-title">${title}</div><div class="node-actions">${deleteBtn}</div></div>
-            ${!isEmpty ? `<div class="floating-node-actions"><button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button></div>` : ''}
+            ${!isEmpty && !isGroup ? `<div class="floating-node-actions"><button class="mini-x node-delete" type="button" title="${escapeHtml(tr('smart.deleteNode'))}"><i data-lucide="trash-2"></i></button></div>` : ''}
+            ${smartNodeToolbarHtml(node)}
             ${runTimePillHtml(node)}
             <div class="node-body">${body}</div>
             <div class="node-hint">${isPending ? escapeHtml(tr('smart.hintPending')) : (imgs.length > 1 ? escapeHtml(tr('smart.hintMulti')) : imgs.length ? escapeHtml(tr('smart.hintSingle')) : escapeHtml(tr('smart.hintEmpty')))}</div>
@@ -5060,19 +5729,33 @@ function measureSmartNodeImages(){
         const image = node?.images?.[index];
         if(imgEl.tagName?.toLowerCase() === 'img' && image?.url) bindImageProxyFallback(imgEl, image);
         if(!node || !image || image.natural_w || image.natural_h) return;
+        const isPreview = isSmartPreviewImage(imgEl);
+        if(isPreview && image.layout_w && image.layout_h) return;
         const apply = () => {
             const w = imgEl.naturalWidth || imgEl.videoWidth || 0;
             const h = imgEl.naturalHeight || imgEl.videoHeight || 0;
             if(w <= 0 || h <= 0 || image.natural_w || image.natural_h) return;
-            image.natural_w = w;
-            image.natural_h = h;
+            const prevW = Number(image.layout_w || 0);
+            const prevH = Number(image.layout_h || 0);
+            if(isPreview){
+                if(prevW === w && prevH === h) return;
+                image.layout_w = w;
+                image.layout_h = h;
+            } else {
+                image.natural_w = w;
+                image.natural_h = h;
+                delete image.layout_w;
+                delete image.layout_h;
+            }
             applyThumbDisplaySizeToElement(itemEl, image, Math.max(itemEl?.clientWidth || 0, itemEl?.clientHeight || 0));
+            updateImageResolutionBadgeElement(itemEl, image);
             if((node.images || []).length === 1 && !node.w && !node.h){
                 const layout = singleImageLayout(image, node, mediaNodeDefaultScale(node));
                 node.w = layout.width;
                 node.h = layout.height;
             }
-            render();
+            updateNodeElementDuringResize(node);
+            if(isNodeSelected(node.id)) updateComposer();
             scheduleSave();
         };
         const isVideo = imgEl.tagName?.toLowerCase() === 'video';
@@ -5175,6 +5858,15 @@ function bindPromptNodeControls(el, node){
     if(systemEl) { bindScrollableText(systemEl); systemEl.oninput = e => { node.llmSystemPrompt = e.target.value; scheduleSave(); }; }
     const instructionEl = el.querySelector('.prompt-llm-instruction');
     if(instructionEl) { bindScrollableText(instructionEl); instructionEl.oninput = e => { node.llmInstruction = e.target.value; scheduleSave(); }; }
+    const instructionResizeEl = el.querySelector('[data-llm-instruction-resize]');
+    if(instructionResizeEl) instructionResizeEl.addEventListener('mousedown', e => {
+        if(e.button !== 0) return;
+        e.preventDefault(); e.stopPropagation();
+        llmInstructionResizeState = {id:node.id, startY:e.clientY, startH:promptLlmInstructionHeight(node), startNodeH:promptNodeLayoutSize(node).height};
+        // 拖动期间屏蔽文本框的指针/选区，否则上拉时光标滑到上方输入框会被它抢走（选中文字/失焦）。
+        document.body.classList.add('smart-node-resize', 'smart-llm-instr-resize');
+        capturePendingUndo();
+    });
     const runEl = el.querySelector('.prompt-node-run');
     if(runEl) runEl.onclick = e => { e.preventDefault(); e.stopPropagation(); runPromptLLMNode(node.id); };
 }
@@ -5447,7 +6139,7 @@ function handlePortDrop(drag, e){
         return;
     }
     if(!drag.moved){ discardPendingUndo(); render(); return; }
-    if(hit?.closest?.('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.smart-minimap')){
+    if(hit?.closest?.('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.smart-minimap')){
         discardPendingUndo(); render(); return;
     }
     const p = screenToWorld(e);
@@ -5488,10 +6180,16 @@ function bindNodeEvents(){
             if(Date.now() < suppressNodeClickUntil) return;
             const node = nodes.find(n => n.id === id);
             hideRunTimerForNode(node);
+            const alreadySelected = selectedId === id && selectedIds.length === 0 && selectedImage.nodeId === '';
             selectedId = id;
             selectedIds = [];
             selectedImage = {nodeId:'', index:-1};
-        if(smartCascadeAnyRunning()) smartCascadeSilentSelection = false;
+            if(smartCascadeAnyRunning()) smartCascadeSilentSelection = false;
+            if(alreadySelected){
+                syncSelectionUi();
+                updateComposer();
+                return;
+            }
             render();
         };
         el.ondblclick = e => e.stopPropagation();
@@ -5519,6 +6217,17 @@ function bindNodeEvents(){
                 deleteNodeFromButton(id);
             });
         });
+        el.querySelectorAll('[data-smart-node-action]').forEach(btn => {
+            btn.addEventListener('mousedown', e => {
+                e.preventDefault();
+                e.stopPropagation();
+            }, true);
+            btn.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopPropagation();
+                runSmartNodeToolbarAction(btn.dataset.nodeId || id, btn.dataset.smartNodeAction);
+            });
+        });
         el.querySelectorAll('[data-jimeng-query]').forEach(btn => {
             btn.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); }, true);
             btn.addEventListener('click', e => {
@@ -5526,11 +6235,43 @@ function bindNodeEvents(){
                 queryJimengNow(btn.dataset.jimengQuery);
             });
         });
+        el.querySelectorAll('[data-image-task-query]').forEach(btn => {
+            btn.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); }, true);
+            btn.addEventListener('click', e => {
+                e.preventDefault(); e.stopPropagation();
+                querySmartImageTaskNow(btn.dataset.imageTaskQuery, btn.dataset.taskId);
+            });
+        });
+        el.querySelectorAll('[data-thumb-scroll]').forEach(scroller => {
+            scroller.addEventListener('wheel', e => {
+                e.stopPropagation();
+            }, {passive:false});
+        });
         el.querySelectorAll('.image-delete').forEach(btn => {
             btn.addEventListener('click', e => {
                 e.preventDefault(); e.stopPropagation();
                 deleteImage(id, Number(btn.dataset.imageIndex));
             });
+        });
+        el.querySelectorAll('.smart-video-play').forEach(btn => {
+            btn.addEventListener('mousedown', e => {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+            }, true);
+            btn.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+                const item = btn.closest('[data-image-index]');
+                const imageIndex = Number(item?.dataset.imageIndex || 0);
+                const owner = nodes.find(n => n.id === id);
+                if(mediaKindForItem(owner?.images?.[imageIndex] || {}) !== 'video') return;
+                clearImageClickTimer();
+                suppressImageClickUntil = Date.now() + 260;
+                hideRunTimerForNode(owner);
+                smartActivateVideoPreview(btn);
+            }, true);
         });
         el.querySelectorAll('.thumb-item,.image-wrap').forEach(item => {
             item.setAttribute('draggable', 'false');
@@ -5538,6 +6279,7 @@ function bindNodeEvents(){
                 e.preventDefault();
             });
             item.addEventListener('mousedown', e => {
+                if(e.target.closest('video,audio')) return;
                 if(e.button !== 0 || e.target.closest('.image-delete')) return;
                 if(e.detail < 2) return;
                 e.preventDefault();
@@ -5545,18 +6287,33 @@ function bindNodeEvents(){
                 e.stopImmediatePropagation();
                 clearImageClickTimer();
                 suppressImageClickUntil = Date.now() + 260;
+                const imageIndex = Number(item.dataset.imageIndex || 0);
+                const owner = nodes.find(n => n.id === id);
+                if(mediaKindForItem(owner?.images?.[imageIndex] || {}) === 'video'){
+                    smartActivateVideoPreview(item);
+                    return;
+                }
                 selectedId = id;
                 selectedIds = [];
-                selectedImage = {nodeId:id, index:Number(item.dataset.imageIndex || 0)};
-                openImagePreview(id, Number(item.dataset.imageIndex || 0));
+                selectedImage = {nodeId:id, index:imageIndex};
+                openImagePreview(id, imageIndex);
             }, true);
             item.addEventListener('click', e => {
+                if(e.target.closest('video,audio')) return;
                 if(e.target.closest('.image-delete')) return;
                 e.preventDefault();
                 e.stopPropagation();
                 e.stopImmediatePropagation();
                 if(Date.now() < suppressImageClickUntil) return;
                 const imageIndex = Number(item.dataset.imageIndex || 0);
+                const owner = nodes.find(n => n.id === id);
+                if(mediaKindForItem(owner?.images?.[imageIndex] || {}) === 'video'){
+                    clearImageClickTimer();
+                    suppressImageClickUntil = Date.now() + 260;
+                    hideRunTimerForNode(owner);
+                    smartActivateVideoPreview(item);
+                    return;
+                }
                 if(e.detail >= 2){
                     clearImageClickTimer();
                     suppressImageClickUntil = Date.now() + 260;
@@ -5569,7 +6326,6 @@ function bindNodeEvents(){
                 clearImageClickTimer();
                 imageClickTimer = setTimeout(() => {
                     imageClickTimer = null;
-                const owner = nodes.find(n => n.id === id);
                 hideRunTimerForNode(owner);
                 const isGroupOwner = (owner?.images || []).length > 1;
                 selectedId = id;
@@ -5584,20 +6340,28 @@ function bindNodeEvents(){
                 }, 220);
             });
         item.addEventListener('dblclick', e => {
+            if(e.target.closest('video,audio')) return;
             if(e.target.closest('.image-delete')) return;
             e.preventDefault();
             e.stopPropagation();
             e.stopImmediatePropagation();
             clearImageClickTimer();
             suppressImageClickUntil = Date.now() + 260;
+            const imageIndex = Number(item.dataset.imageIndex || 0);
+            const owner = nodes.find(n => n.id === id);
+            if(mediaKindForItem(owner?.images?.[imageIndex] || {}) === 'video'){
+                smartActivateVideoPreview(item);
+                return;
+            }
             selectedId = id;
             selectedIds = [];
-            selectedImage = {nodeId:id, index:Number(item.dataset.imageIndex || 0)};
-            openImagePreview(id, Number(item.dataset.imageIndex || 0));
+            selectedImage = {nodeId:id, index:imageIndex};
+            openImagePreview(id, imageIndex);
         }, true);
         });
         el.querySelectorAll('.thumb-item').forEach(item => {
             item.addEventListener('mousedown', e => {
+                if(e.target.closest('video,audio')) return;
                 if(e.button !== 0 || e.target.closest('.mini-x')) return;
                 if(e.detail >= 2) return;
                 const node = nodes.find(n => n.id === id);
@@ -5618,8 +6382,8 @@ function bindNodeEvents(){
             capturePendingUndo();
         });
         const beginNodeDrag = e => {
-            if(e.button !== 0 || e.target.closest('.mini-x, .node-resize-handle, .thumb-item, .node-port, select, input, button')) return;
-            if(e.target.closest('.prompt-node-pill, .prompt-node-llm, textarea:not(.prompt-node-text)')) return;
+            if(e.button !== 0 || e.target.closest('.mini-x, .smart-node-floating-menu, .node-resize-handle, .thumb-item, .node-port, select, input, button')) return;
+            if(e.target.closest('.prompt-node-pill, textarea:not(.prompt-node-text)')) return;
             e.preventDefault(); e.stopPropagation();
             window.getSelection?.()?.removeAllRanges?.();
             if(document.activeElement?.blur) document.activeElement.blur();
@@ -5768,6 +6532,7 @@ function disconnectConnection(index){
     if(toNode && Array.isArray(toNode.inputNodeIds)){
         toNode.inputNodeIds = toNode.inputNodeIds.filter(id => id !== conn.from);
     }
+    if(toNode && ['input','flow'].includes(conn.kind || 'flow')) clearDetachedRunInputRefs(toNode);
     if((conn.kind || 'flow') === 'history'){
         const group = nodes.find(n => n.id === conn.to && isHistoryGroupNode(n) && n.historyFor === conn.from);
         demoteHistoryGroupNode(group);
@@ -6199,6 +6964,8 @@ function setImageEditMode(mode, userTouched=false){
     document.getElementById('imageMaskTools').classList.toggle('active', imageEditMode === 'mask');
     document.getElementById('imageBrushTools').classList.toggle('active', imageEditMode === 'brush');
     document.getElementById('imageGridTools').classList.toggle('active', imageEditMode === 'grid');
+    if(imageEditMode === 'grid' && gridOperationMode === 'join' && !canGridJoinCurrentNode()) gridOperationMode = 'split';
+    syncGridOperationControls();
     syncGridGapValue();
     const applyBtn = document.getElementById('imageEditApplyBtn');
     document.getElementById('compareToggleBtn').style.display = isPreview && !isVideoPreview ? 'inline-flex' : 'none';
@@ -6220,7 +6987,8 @@ function setImageEditMode(mode, userTouched=false){
         const subKey = imageEditMode === 'crop' ? 'canvas.cropHint' : imageEditMode === 'outpaint' ? 'canvas.outpaintHint' : imageEditMode === 'mask' ? 'canvas.maskHint2' : imageEditMode === 'brush' ? 'canvas.brushHint' : 'canvas.gridHint';
         document.getElementById('imageEditTitle').textContent = tr(titleKey);
         document.getElementById('imageEditSub').textContent = tr(subKey);
-        applyBtn.innerHTML = `<i data-lucide="${icon}" class="w-4 h-4"></i><span>${tr(labelKey)}</span>`;
+        const applyLabel = imageEditMode === 'grid' && gridOperationMode === 'join' ? '输出拼接' : tr(labelKey);
+        applyBtn.innerHTML = `<i data-lucide="${icon}" class="w-4 h-4"></i><span>${applyLabel}</span>`;
         if(imageEditMode === 'crop'){
             requestAnimationFrame(() => {
                 resetCropBox();
@@ -6239,6 +7007,7 @@ function setImageEditMode(mode, userTouched=false){
     syncEditDrawingHistoryButtons();
     syncBrushToolButtons();
     syncTextToolState(true);
+    updatePreviewNavButtons();
     refreshIcons();
 }
 let previewCompareOn = false;
@@ -6701,11 +7470,13 @@ function refreshComparePanel(){
     const editing = currentEditImage();
     const curUrl = editing.image?.url || '';
     const isVideoPreview = mediaKindForItem(editing.image || {}) === 'video';
+    const isPreviewMode = imageEditMode === 'preview';
     if(panoramaToggle){
-        panoramaToggle.style.display = isVideoPreview ? 'none' : 'inline-flex';
+        panoramaToggle.style.display = isPreviewMode && !isVideoPreview ? 'inline-flex' : 'none';
         panoramaToggle.classList.toggle('active', panoramaState.enabled);
     }
-    if(panoramaState.enabled && !isVideoPreview){
+    if(!isPreviewMode && panoramaState.enabled) disposePanoramaPreview();
+    if(panoramaState.enabled && isPreviewMode && !isVideoPreview){
         currentImg.onload = null;
         currentImg.onerror = null;
         currentImg.style.display = 'none';
@@ -6811,7 +7582,8 @@ function refreshComparePanel(){
     }
     if(previewCompareOn){
         thumbsEl.style.display = 'inline-flex';
-        thumbsEl.innerHTML = sources.map((s, i) => `<button type="button" class="compare-thumb ${i === previewCompareIndex ? 'active' : ''}" data-compare-idx="${i}" title="${escapeHtml(i === previewCompareIndex ? tr('smart.compareCancelTip') : tr('smart.compareUseTip'))}"><img src="${escapeHtml(s.url)}"></button>`).join('');
+        thumbsEl.innerHTML = sources.map((s, i) => `<button type="button" class="compare-thumb ${i === previewCompareIndex ? 'active' : ''}" data-compare-idx="${i}" title="${escapeHtml(i === previewCompareIndex ? tr('smart.compareCancelTip') : tr('smart.compareUseTip'))}">${smartPreviewImgHtml(s.url, 256)}</button>`).join('');
+        bindSmartPreviewImageFallbacks(thumbsEl);
         thumbsEl.querySelectorAll('[data-compare-idx]').forEach(btn => {
             btn.onclick = e => {
                 e.preventDefault(); e.stopPropagation();
@@ -7112,6 +7884,7 @@ function beginEditDraw(event){
     canvasEl.setPointerCapture?.(event.pointerId);
     const p = editDrawPoint(event);
     if(imageEditMode === 'grid'){
+        if(gridOperationMode === 'join') return;
         if(!gridCustomMode) return;
         const hit = gridCustomLineHit(p);
         gridCustomHistory.push([...gridCustomLines.map(line => ({...line}))]);
@@ -7129,6 +7902,7 @@ function beginEditDraw(event){
     normalizeMaskPreviewCanvas(canvasEl);
 }
 function moveEditDraw(event){
+    if(imageEditMode === 'grid' && gridOperationMode === 'join') return;
     if(imageEditMode === 'grid' && gridCustomMode && gridCustomDrag){ event.preventDefault(); event.stopPropagation(); setGridCustomLinePos(gridCustomDrag.index, editDrawPoint(event)); refreshGridSplitPreview(); return; }
     if(!editDrawState || imageEditMode === 'crop' || imageEditMode === 'grid') return;
     event.preventDefault(); event.stopPropagation();
@@ -7148,18 +7922,248 @@ function endEditDraw(event){
     if(gridCustomDrag && event?.pointerId != null) editDrawCanvas().releasePointerCapture?.(event.pointerId);
     editDrawState = null; gridCustomDrag = null; syncEditDrawingHistoryButtons();
 }
+function beginGridJoinDrag(event){
+    if(imageEditMode !== 'grid' || gridOperationMode !== 'join') return;
+    const itemEl = event.target?.closest?.('.grid-join-item');
+    if(!itemEl) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const index = Number(itemEl.dataset.gridJoinIndex);
+    const item = gridJoinLayout?.items?.find(entry => Number(entry.index) === index);
+    const host = document.getElementById('gridJoinCanvas');
+    if(!item || !host) return;
+    itemEl.setPointerCapture?.(event.pointerId);
+    gridJoinDrag = {index, pointerId:event.pointerId, sx:event.clientX, sy:event.clientY, x:item.x, y:item.y};
+    itemEl.classList.add('dragging');
+}
+function moveGridJoinDrag(event){
+    if(!gridJoinDrag || imageEditMode !== 'grid' || gridOperationMode !== 'join') return;
+    event.preventDefault();
+    event.stopPropagation();
+    const item = gridJoinLayout?.items?.find(entry => Number(entry.index) === Number(gridJoinDrag.index));
+    if(!item) return;
+    const host = document.getElementById('gridJoinCanvas');
+    const rect = host?.getBoundingClientRect();
+    const logical = gridJoinCanvasSize();
+    const scale = rect ? Math.max(0.001, rect.width / Math.max(1, logical.w)) : Math.max(0.001, imageEditZoom || 1);
+    const dx = (event.clientX - gridJoinDrag.sx) / scale;
+    const dy = (event.clientY - gridJoinDrag.sy) / scale;
+    gridJoinDrag.dx = dx;
+    gridJoinDrag.dy = dy;
+    const el = host?.querySelector(`[data-grid-join-index="${CSS.escape(String(gridJoinDrag.index))}"]`);
+    if(el){
+        el.style.transform = `translate(${Math.round(dx)}px, ${Math.round(dy)}px)`;
+    }
+}
+function gridJoinDragTarget(){
+    if(!gridJoinDrag || !gridJoinLayout) return null;
+    const dragged = gridJoinLayout.items.find(entry => Number(entry.index) === Number(gridJoinDrag.index));
+    if(!dragged) return null;
+    const dx = gridJoinDrag.dx || 0;
+    const dy = gridJoinDrag.dy || 0;
+    const cx = dragged.x + dx + dragged.w / 2;
+    const cy = dragged.y + dy + dragged.h / 2;
+    return (gridJoinLayout.items || [])
+        .filter(entry => Number(entry.index) !== Number(gridJoinDrag.index))
+        .map(entry => {
+            const inside = cx >= entry.x && cx <= entry.x + entry.w && cy >= entry.y && cy <= entry.y + entry.h;
+            const score = Math.hypot(cx - (entry.x + entry.w / 2), cy - (entry.y + entry.h / 2));
+            return {entry, inside, score};
+        })
+        .filter(item => item.inside || item.score < Math.max(dragged.w, dragged.h, item.entry.w, item.entry.h) * 0.55)
+        .sort((a, b) => (b.inside - a.inside) || a.score - b.score)[0]?.entry || null;
+}
+function endGridJoinDrag(event){
+    if(!gridJoinDrag) return;
+    const host = document.getElementById('gridJoinCanvas');
+    const draggedEl = host?.querySelector(`[data-grid-join-index="${CSS.escape(String(gridJoinDrag.index))}"]`);
+    draggedEl?.classList.remove('dragging');
+    if(draggedEl) draggedEl.style.transform = '';
+    const dragged = gridJoinLayout?.items?.find(entry => Number(entry.index) === Number(gridJoinDrag.index));
+    const target = gridJoinDragTarget();
+    if(dragged && target){
+        const order = gridJoinVisualOrder();
+        const a = order.indexOf(Number(dragged.index));
+        const b = order.indexOf(Number(target.index));
+        if(a >= 0 && b >= 0) [order[a], order[b]] = [order[b], order[a]];
+        setGridJoinLayoutOrder(order, gridJoinLayout.rows, gridJoinLayout.cols, gridJoinLayout.gap);
+        gridJoinUserMoved = true;
+        renderGridJoinPreview();
+    }
+    if(event?.pointerId != null) event.target?.releasePointerCapture?.(event.pointerId);
+    gridJoinDrag = null;
+}
 function syncGridGapValue(){
     const input = document.getElementById('gridGapSize');
     const value = Math.max(0, Math.min(240, Number(input?.value || 0)));
     if(input) input.value = value;
     const label = document.getElementById('gridGapValue');
     if(label) label.textContent = String(value);
+    if(gridJoinLayout && gridOperationMode === 'join'){
+        const rows = gridJoinLayout.rows;
+        const cols = gridJoinLayout.cols;
+        const order = gridJoinVisualOrder();
+        setGridJoinLayoutOrder(order, rows, cols, value);
+    }
     return value;
+}
+function gridGapInputValue(){
+    return Math.max(0, Math.min(240, Number(document.getElementById('gridGapSize')?.value || 0)));
 }
 function gridSplitSettings(){
     const hLines = Math.max(0, Math.min(20, Number(document.getElementById('gridHorizontalLines')?.value || 0)));
     const vLines = Math.max(0, Math.min(20, Number(document.getElementById('gridVerticalLines')?.value || 0)));
     return {rows:hLines + 1, cols:vLines + 1, gap:syncGridGapValue()};
+}
+function currentGridJoinItems(){
+    const node = currentEditImage().node;
+    return (node?.images || [])
+        .map((item, index) => ({item:imageForDisplay(item), source:item, index}))
+        .filter(entry => mediaKindForItem(entry.item) === 'image' && entry.item?.url);
+}
+function canGridJoinCurrentNode(){
+    return currentGridJoinItems().length > 1;
+}
+function gridJoinAutoDims(count){
+    const cols = Math.max(1, Math.ceil(Math.sqrt(Math.max(1, count))));
+    return {rows:Math.max(1, Math.ceil(count / cols)), cols};
+}
+function gridJoinNaturalSize(entry){
+    const item = entry?.item || {};
+    const cached = gridJoinImageCache.get(entry?.index);
+    const w = Number(item.natural_w || item.width || cached?.naturalWidth || 0);
+    const h = Number(item.natural_h || item.height || cached?.naturalHeight || 0);
+    return {w:Math.max(1, w || 512), h:Math.max(1, h || 512)};
+}
+function gridJoinBaseCellSize(items){
+    const sizes = items.map(gridJoinNaturalSize);
+    const maxW = Math.max(1, ...sizes.map(size => size.w));
+    const maxH = Math.max(1, ...sizes.map(size => size.h));
+    const scale = Math.min(1, 420 / Math.max(maxW, maxH));
+    return {w:Math.max(1, Math.round(maxW * scale)), h:Math.max(1, Math.round(maxH * scale)), scale};
+}
+function gridJoinItemDisplaySize(entry, cell){
+    return {
+        w:Math.max(1, Math.round(cell.w)),
+        h:Math.max(1, Math.round(cell.h))
+    };
+}
+function ensureGridJoinLayout(rows=null, cols=null){
+    const items = currentGridJoinItems();
+    if(!items.length){ gridJoinLayout = null; return null; }
+    const auto = gridJoinAutoDims(items.length);
+    const nextRows = Math.max(1, Number(rows || gridJoinLayout?.rows || auto.rows) || auto.rows);
+    const nextCols = Math.max(1, Number(cols || gridJoinLayout?.cols || auto.cols) || auto.cols);
+    const byIndex = new Map(items.map(entry => [entry.index, entry]));
+    const previousOrder = gridJoinVisualOrder()
+        .map(index => byIndex.get(Number(index)))
+        .filter(Boolean);
+    const ordered = [
+        ...previousOrder,
+        ...items.filter(entry => !previousOrder.some(prev => Number(prev.index) === Number(entry.index)))
+    ];
+    const cell = gridJoinBaseCellSize(ordered);
+    const gap = gridGapInputValue();
+    const layoutItems = ordered.map((entry, order) => {
+        const row = Math.floor(order / nextCols);
+        const col = order % nextCols;
+        const {w, h} = gridJoinItemDisplaySize(entry, cell);
+        return {
+            index:entry.index,
+            x:col * (cell.w + gap),
+            y:row * (cell.h + gap),
+            w,
+            h
+        };
+    });
+    gridJoinLayout = {rows:nextRows, cols:nextCols, cellW:cell.w, cellH:cell.h, gap, items:layoutItems};
+    return gridJoinLayout;
+}
+function gridJoinVisualOrder(layout=gridJoinLayout){
+    return (layout?.items || [])
+        .slice()
+        .sort((a, b) => (Number(a.y || 0) - Number(b.y || 0)) || (Number(a.x || 0) - Number(b.x || 0)))
+        .map(item => Number(item.index));
+}
+function setGridJoinLayoutOrder(order, rows=null, cols=null, gapOverride=null){
+    const entries = currentGridJoinItems();
+    if(!entries.length){ gridJoinLayout = null; return null; }
+    const byIndex = new Map(entries.map(entry => [entry.index, entry]));
+    const ordered = [
+        ...order.map(index => byIndex.get(Number(index))).filter(Boolean),
+        ...entries.filter(entry => !order.includes(entry.index))
+    ];
+    const auto = gridJoinAutoDims(ordered.length);
+    const nextRows = Math.max(1, Number(rows || gridJoinLayout?.rows || auto.rows) || auto.rows);
+    const nextCols = Math.max(1, Number(cols || gridJoinLayout?.cols || auto.cols) || auto.cols);
+    const cell = gridJoinBaseCellSize(ordered);
+    const gap = Math.max(0, Math.min(240, Number(gapOverride ?? document.getElementById('gridGapSize')?.value ?? 0)));
+    const layoutItems = ordered.map((entry, orderIndex) => {
+        const row = Math.floor(orderIndex / nextCols);
+        const col = orderIndex % nextCols;
+        const {w, h} = gridJoinItemDisplaySize(entry, cell);
+        return {
+            index:entry.index,
+            x:col * (cell.w + gap),
+            y:row * (cell.h + gap),
+            w,
+            h
+        };
+    });
+    gridJoinLayout = {rows:nextRows, cols:nextCols, cellW:cell.w, cellH:cell.h, gap, items:layoutItems};
+    return gridJoinLayout;
+}
+function resetGridJoinLayout(){
+    gridJoinUserMoved = false;
+    gridJoinLayout = null;
+    ensureGridJoinLayout();
+    renderGridJoinPreview();
+}
+function applyGridJoinPreset(rows, cols){
+    gridJoinUserMoved = false;
+    const order = gridJoinVisualOrder();
+    if(order.length) setGridJoinLayoutOrder(order, rows, cols);
+    else {
+        gridJoinLayout = null;
+        ensureGridJoinLayout(rows, cols);
+    }
+    renderGridJoinPreview();
+}
+function setGridJoinOutputSize(size){
+    gridJoinOutputSize = Math.max(256, Math.min(8192, Number(size) || 2048));
+    syncGridJoinSizeControls();
+    refreshGridSplitPreview();
+}
+function syncGridJoinSizeControls(){
+    document.querySelectorAll('[data-grid-join-size]').forEach(btn => {
+        const active = Number(btn.dataset.gridJoinSize || 0) === Number(gridJoinOutputSize);
+        btn.classList.toggle('active', active);
+    });
+}
+function setGridOperationMode(mode){
+    gridOperationMode = mode === 'join' && canGridJoinCurrentNode() ? 'join' : 'split';
+    if(mode === 'join' && gridOperationMode !== 'join') toast('请从包含多张图片的分组打开宫格拼接');
+    syncGridOperationControls();
+    refreshGridSplitPreview();
+}
+function syncGridOperationControls(){
+    const join = gridOperationMode === 'join';
+    document.getElementById('gridSplitModeBtn')?.classList.toggle('primary', !join);
+    document.getElementById('gridSplitModeBtn')?.classList.toggle('secondary', join);
+    const joinBtn = document.getElementById('gridJoinModeBtn');
+    if(joinBtn){
+        joinBtn.disabled = !canGridJoinCurrentNode();
+        joinBtn.classList.toggle('primary', join);
+        joinBtn.classList.toggle('secondary', !join);
+    }
+    document.querySelectorAll('.grid-split-control').forEach(el => { el.style.display = join ? 'none' : (el.id === 'gridRegularControls' ? 'contents' : ''); });
+    document.querySelectorAll('.grid-join-control').forEach(el => { el.style.display = join ? 'flex' : 'none'; });
+    syncGridJoinSizeControls();
+    if(!join) syncGridCustomControls();
+    document.getElementById('cropCanvas')?.classList.toggle('grid-join-mode', join);
+    document.getElementById('cropImage')?.classList.toggle('grid-join-hidden', join);
+    if(join) ensureGridJoinLayout();
+    else gridJoinDrag = null;
 }
 function gridSplitRects(width, height){
     if(gridCustomMode) return gridSplitRectsCustom(width, height);
@@ -7203,11 +8207,14 @@ function applyGridPreset(rows, cols){
     syncGridCustomCursor(); syncGridCustomUndoBtn(); refreshGridSplitPreview();
 }
 function syncGridCustomControls(){
+    const join = gridOperationMode === 'join';
     const custom = document.getElementById('gridCustomControls');
-    if(custom) custom.style.display = gridCustomMode ? 'flex' : 'none';
-    document.querySelectorAll('.grid-preset-row').forEach(row => {
-        row.style.display = gridCustomMode ? 'none' : 'flex';
+    if(custom) custom.style.display = !join && gridCustomMode ? 'flex' : 'none';
+    document.querySelectorAll('.grid-split-control.grid-preset-row').forEach(row => {
+        row.style.display = !join && !gridCustomMode ? 'flex' : 'none';
     });
+    const regular = document.getElementById('gridRegularControls');
+    if(regular) regular.style.display = !join && !gridCustomMode ? 'contents' : 'none';
 }
 function toggleGridCustomMode(){
     gridCustomMode = !gridCustomMode;
@@ -7297,14 +8304,97 @@ function updateZoomLabel(){
 }
 function syncGridCustomCursor(){
     const el = document.getElementById('cropCanvas');
-    el.classList.toggle('grid-custom-h', imageEditMode === 'grid' && gridCustomMode && gridCustomOrientation === 'h');
-    el.classList.toggle('grid-custom-v', imageEditMode === 'grid' && gridCustomMode && gridCustomOrientation === 'v');
+    el.classList.toggle('grid-custom-h', imageEditMode === 'grid' && gridOperationMode !== 'join' && gridCustomMode && gridCustomOrientation === 'h');
+    el.classList.toggle('grid-custom-v', imageEditMode === 'grid' && gridOperationMode !== 'join' && gridCustomMode && gridCustomOrientation === 'v');
+}
+function gridJoinCanvasSize(layout=gridJoinLayout){
+    if(!layout) return {w:1, h:1};
+    const gap = Math.max(0, Number(layout.gap || 0));
+    const byGrid = {
+        w:Math.max(1, Number(layout.cols || 1) * Number(layout.cellW || 1) + Math.max(0, Number(layout.cols || 1) - 1) * gap),
+        h:Math.max(1, Number(layout.rows || 1) * Number(layout.cellH || 1) + Math.max(0, Number(layout.rows || 1) - 1) * gap)
+    };
+    const byItems = (layout.items || []).reduce((acc, item) => ({
+        w:Math.max(acc.w, Number(item.x || 0) + Number(item.w || 0)),
+        h:Math.max(acc.h, Number(item.y || 0) + Number(item.h || 0))
+    }), byGrid);
+    return {w:Math.ceil(byItems.w), h:Math.ceil(byItems.h)};
+}
+function renderGridJoinPreview(){
+    const host = document.getElementById('gridJoinCanvas');
+    const countEl = document.getElementById('gridSplitCount');
+    const cropCanvasEl = document.getElementById('cropCanvas');
+    if(!host) return;
+    host.innerHTML = '';
+    if(imageEditMode !== 'grid' || gridOperationMode !== 'join'){
+        host.style.display = 'none';
+        if(cropCanvasEl){ cropCanvasEl.style.width = ''; cropCanvasEl.style.height = ''; }
+        return;
+    }
+    const items = currentGridJoinItems();
+    if(items.length <= 1){
+        host.style.display = 'none';
+        if(cropCanvasEl){ cropCanvasEl.style.width = ''; cropCanvasEl.style.height = ''; }
+        if(countEl) countEl.textContent = '分组需要至少 2 张图片';
+        return;
+    }
+    const layout = ensureGridJoinLayout();
+    const size = gridJoinCanvasSize(layout);
+    const zoom = Math.max(0.05, Number(imageEditZoom || 1));
+    const displayW = Math.max(1, Math.round(size.w * zoom));
+    const displayH = Math.max(1, Math.round(size.h * zoom));
+    host.style.display = 'block';
+    host.style.width = `${Math.max(1, Math.round(size.w))}px`;
+    host.style.height = `${Math.max(1, Math.round(size.h))}px`;
+    host.style.transform = `scale(${zoom})`;
+    host.style.transformOrigin = '0 0';
+    if(cropCanvasEl){
+        cropCanvasEl.style.width = `${displayW}px`;
+        cropCanvasEl.style.height = `${displayH}px`;
+    }
+    const byIndex = new Map(items.map(entry => [entry.index, entry]));
+    (layout.items || []).forEach(item => {
+        const entry = byIndex.get(item.index);
+        if(!entry) return;
+        const img = document.createElement('img');
+        img.className = 'grid-join-item';
+        img.draggable = false;
+        img.dataset.gridJoinIndex = String(item.index);
+        img.style.left = `${Math.round(item.x)}px`;
+        img.style.top = `${Math.round(item.y)}px`;
+        img.style.width = `${Math.round(item.w)}px`;
+        img.style.height = `${Math.round(item.h)}px`;
+        img.alt = entry.item.name || `image-${item.index + 1}`;
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+            const hadNaturalSize = Boolean(entry.source.natural_w && entry.source.natural_h);
+            gridJoinImageCache.set(item.index, img);
+            if(!entry.source.natural_w && img.naturalWidth) entry.source.natural_w = img.naturalWidth;
+            if(!entry.source.natural_h && img.naturalHeight) entry.source.natural_h = img.naturalHeight;
+            if(!hadNaturalSize && img.naturalWidth && img.naturalHeight && imageEditMode === 'grid' && gridOperationMode === 'join'){
+                ensureGridJoinLayout();
+                renderGridJoinPreview();
+            }
+        };
+        img.onerror = () => {
+            if(img.dataset.proxyFallbackTried === '1') return;
+            const fallback = proxiedMediaUrl(entry.item);
+            if(!fallback || fallback === img.getAttribute('src')) return;
+            img.dataset.proxyFallbackTried = '1';
+            img.src = fallback;
+        };
+        img.src = displayMediaUrl(entry.item);
+        host.appendChild(img);
+    });
+    if(countEl) countEl.textContent = `将拼接 ${items.length} 张图片 · 输出长边 ${Math.round(gridJoinOutputSize / 1024)}K`;
 }
 function refreshGridSplitPreview(){
     const canvasEl = editDrawCanvas();
     const ctx = canvasEl.getContext('2d');
     ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    renderGridJoinPreview();
     if(imageEditMode !== 'grid') return;
+    if(gridOperationMode === 'join') return;
     const countEl = document.getElementById('gridSplitCount');
     const lineWidth = Math.max(2, Math.round(Math.min(canvasEl.width, canvasEl.height) / 320));
     const drawLine = (x1, y1, x2, y2) => {
@@ -7427,12 +8517,12 @@ function updatePreviewNavButtons(){
     const node = nodes.find(n => n.id === previewNavState.nodeId);
     const count = Math.max(0, (node?.images || []).filter(img => img?.url).length);
     previewNavState.count = count;
-    const show = imageEditModal.classList.contains('open') && count > 1;
+    const show = imageEditModal.classList.contains('open') && imageEditMode === 'preview' && count > 1;
     document.getElementById('previewPrevBtn')?.classList.toggle('visible', show);
     document.getElementById('previewNextBtn')?.classList.toggle('visible', show);
 }
 function navigatePreviewImage(delta){
-    if(!imageEditModal.classList.contains('open')) return;
+    if(!imageEditModal.classList.contains('open') || imageEditMode !== 'preview') return;
     const node = nodes.find(n => n.id === previewNavState.nodeId);
     const images = (node?.images || []).filter(img => img?.url);
     if(!node || images.length <= 1) return;
@@ -7458,11 +8548,13 @@ function openImageEditor(nodeId, imageIndex=0){
     previewNavState = {nodeId, index:imageIndex, count:(node.images || []).filter(img => img?.url).length};
     cropState = {nodeId, imageIndex, x:0, y:0, w:0, h:0};
     gridCustomMode = false; gridCustomLines = []; gridCustomHistory = []; gridCustomDrag = null; gridCustomOrientation = 'h';
+    gridOperationMode = 'split'; gridJoinLayout = null; gridJoinDrag = null; gridJoinImageCache = new Map(); gridJoinUserMoved = false;
     imageEditZoom = 1.0; imageEditBaseW = 0; imageEditBaseH = 0; imageEditModeTouched = false;
     editTextItems = []; editTextSelectedId = ''; editTextDrag = null; editTextDirty = false;
     const toggle = document.getElementById('gridCustomToggle');
     if(toggle){ toggle.classList.add('secondary'); toggle.classList.remove('primary'); }
     syncGridCustomControls();
+    syncGridOperationControls();
     ['gridHorizontalLines','gridVerticalLines'].forEach(id => { const el = document.getElementById(id); if(el) el.disabled = false; });
     const orientH = document.getElementById('gridOrientH'), orientV = document.getElementById('gridOrientV');
     if(orientH){ orientH.classList.add('primary'); orientH.classList.remove('secondary'); }
@@ -7529,7 +8621,7 @@ function closeImageEditor(){
         previewVideo.style.display = 'none';
     }
     clearEditDrawing(true);
-    cropState = null; cropDrag = null; editDrawState = null; resetEditDrawingHistory(); gridCustomDrag = null;
+    cropState = null; cropDrag = null; editDrawState = null; resetEditDrawingHistory(); gridCustomDrag = null; gridJoinDrag = null; gridJoinLayout = null; gridJoinImageCache = new Map(); gridJoinUserMoved = false; gridOperationMode = 'split';
     previewNavState = {nodeId:'', index:0, count:0};
     imageEditZoom = 1.0; imageEditBaseW = 0; imageEditBaseH = 0; imageEditModeTouched = false;
     disposePanoramaPreview();
@@ -7537,6 +8629,10 @@ function closeImageEditor(){
     document.getElementById('imageEditStage')?.classList.remove('overflow-x', 'overflow-y', 'preview-mode');
     const cropCanvasEl = document.getElementById('cropCanvas');
     cropCanvasEl?.classList.remove('grid-custom-h', 'grid-custom-v', 'outpaint-mode', 'outpaint-warning', 'dragging-image', 'text-mode');
+    cropCanvasEl?.classList.remove('grid-join-mode');
+    document.getElementById('cropImage')?.classList.remove('grid-join-hidden');
+    const joinCanvas = document.getElementById('gridJoinCanvas');
+    if(joinCanvas){ joinCanvas.innerHTML = ''; joinCanvas.style.display = 'none'; joinCanvas.style.width = ''; joinCanvas.style.height = ''; }
     if(cropCanvasEl){ cropCanvasEl.style.width = ''; cropCanvasEl.style.height = ''; }
     const textCanvas = editTextCanvas();
     if(textCanvas){ textCanvas.style.left = ''; textCanvas.style.top = ''; }
@@ -7702,6 +8798,7 @@ async function applyImageBrush(){
 }
 async function applyImageGridSplit(){
     if(!cropState) return;
+    if(gridOperationMode === 'join') return applyImageGridJoin();
     const {node, image} = currentEditImage();
     const img = document.getElementById('cropImage');
     if(!node || !image || !img.naturalWidth || !img.naturalHeight) return;
@@ -7729,6 +8826,85 @@ async function applyImageGridSplit(){
         })));
         outputNode.title = 'Grid';
         closeImageEditor(); render(); scheduleSave();
+    }
+}
+function loadGridJoinImage(entry){
+    const cached = gridJoinImageCache.get(entry.index);
+    if(cached?.complete && cached.naturalWidth) return Promise.resolve(cached);
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+            gridJoinImageCache.set(entry.index, img);
+            resolve(img);
+        };
+        img.onerror = () => {
+            if(img.dataset.proxyFallbackTried === '1'){
+                reject(new Error('图片加载失败'));
+                return;
+            }
+            const fallback = proxiedMediaUrl(entry.item);
+            if(!fallback || fallback === img.src){
+                reject(new Error('图片加载失败'));
+                return;
+            }
+            img.dataset.proxyFallbackTried = '1';
+            img.src = fallback;
+        };
+        img.src = displayMediaUrl(entry.item);
+    });
+}
+function drawImageCover(ctx, img, dx, dy, dw, dh){
+    const sw = Math.max(1, Number(img?.naturalWidth || img?.videoWidth || img?.width || 1));
+    const sh = Math.max(1, Number(img?.naturalHeight || img?.videoHeight || img?.height || 1));
+    const targetW = Math.max(1, Number(dw || 1));
+    const targetH = Math.max(1, Number(dh || 1));
+    const scale = Math.max(targetW / sw, targetH / sh);
+    const cropW = Math.max(1, targetW / scale);
+    const cropH = Math.max(1, targetH / scale);
+    const sx = Math.max(0, (sw - cropW) / 2);
+    const sy = Math.max(0, (sh - cropH) / 2);
+    ctx.drawImage(img, sx, sy, cropW, cropH, dx, dy, targetW, targetH);
+}
+async function applyImageGridJoin(){
+    const {node, image} = currentEditImage();
+    const items = currentGridJoinItems();
+    if(!node || items.length <= 1){ toast('请从包含多张图片的分组打开宫格拼接'); return; }
+    const layout = ensureGridJoinLayout();
+    if(!layout?.items?.length) return;
+    const size = gridJoinCanvasSize(layout);
+    const targetLong = Math.max(256, Number(gridJoinOutputSize) || 2048);
+    const outputScale = Math.max(1, targetLong / Math.max(1, Math.max(size.w, size.h)));
+    const canvasEl = document.createElement('canvas');
+    canvasEl.width = Math.max(1, Math.round(size.w * outputScale));
+    canvasEl.height = Math.max(1, Math.round(size.h * outputScale));
+    const ctx = canvasEl.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvasEl.width, canvasEl.height);
+    const byIndex = new Map(items.map(entry => [entry.index, entry]));
+    for(const item of layout.items || []){
+        const entry = byIndex.get(item.index);
+        if(!entry) continue;
+        const img = await loadGridJoinImage(entry);
+        drawImageCover(ctx, img, Math.round(item.x * outputScale), Math.round(item.y * outputScale), Math.round(item.w * outputScale), Math.round(item.h * outputScale));
+    }
+    const blob = await new Promise(resolve => canvasEl.toBlob(resolve, 'image/png'));
+    const base = safeExportFileName((downloadNameForMediaItem(image || items[0]?.item, 'image') || 'image').replace(/\.[^.]+$/, ''), 'image');
+    const file = blob ? await uploadCroppedBlob(blob, `${base}_join.png`) : null;
+    if(file){
+        const rect = nodeRect(node);
+        const outputNode = createImageNodeAt({x:rect.x + rect.width + 240, y:rect.y + rect.height / 2}, [{
+            url:file.url,
+            name:file.name,
+            kind:'image',
+            natural_w:canvasEl.width,
+            natural_h:canvasEl.height
+        }], {select:true, skipUndo:true});
+        outputNode.title = 'Grid Join';
+        closeImageEditor();
+        render();
+        scheduleSave();
+        toast('已输出拼接图片');
     }
 }
 function applyImageEdit(){
@@ -7853,12 +9029,13 @@ function renderInputThumbsRow(node){
         const title = isSelf
             ? tr('smart.inputSelf')
             : (smartImageMode(node) === 'workflow' ? tr('smart.inputUpstreamWorkflow') : tr('smart.inputUpstream'));
-        const inner = isVid ? `<video src="${escapeHtml(img.url)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video>` : `<img src="${escapeHtml(img.url)}" draggable="false">`;
+        const inner = isVid ? smartVideoPreviewHtml(img, 256, 'draggable="false" alt=""') : smartPreviewImgHtml(img, 256, 'draggable="false"');
         const label = `图${i + 1}`;
         const sourceUrl = img.originalLocalUrl || img.url || '';
         return `<div class="input-thumb ${isSelf ? 'input-self' : ''}" draggable="false" data-thumb-index="${i}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${img.imageIndex ?? ''}" data-url="${escapeHtml(img.url || '')}" data-source-url="${escapeHtml(sourceUrl)}" title="${escapeHtml(`${img.name || tr('smart.inputNum').replace('{n}', String(i + 1))} · ${title}`)}">${inner}<span class="input-thumb-label">${escapeHtml(label)}</span></div>`;
     }).join('');
     inputThumbsRow.innerHTML = `<div class="input-thumb-list">${thumbsHtml}${dedup.length > 1 ? `<span class="input-thumb-count">${escapeHtml(tr('smart.inputCount').replace('{n}', String(dedup.length)))}</span>` : ''}</div>`;
+    bindSmartPreviewImageFallbacks(inputThumbsRow);
     bindInputThumbsDrag(node, dedup);
 }
 function bindInputThumbsDrag(node, items){
@@ -8408,8 +9585,8 @@ function mentionTokenHtml(img){
     const name = img.alias || img.name || '图片';
     const kind = mediaKindForItem(img);
     const media = kind === 'video'
-        ? `<video src="${escapeHtml(img.url)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video>`
-        : `<img src="${escapeHtml(img.url)}" alt="">`;
+        ? smartVideoPreviewHtml(img, 256, 'alt=""')
+        : smartPreviewImgHtml(img, 256, 'alt=""');
     return `<span class="mention-image-token" contenteditable="false" data-url="${escapeHtml(img.url)}" data-kind="${escapeHtml(kind)}" data-name="${escapeHtml(name)}" data-node-id="${escapeHtml(img.nodeId || '')}" data-image-index="${escapeHtml(img.imageIndex ?? '')}">${media}<span>${escapeHtml(name)}</span></span>`;
 }
 function promptHtmlWithMentionTokens(text, refs=[]){
@@ -8520,10 +9697,13 @@ function connectInputNode(fromId, toId){
 function upstreamNodesForKinds(node, kinds=['input']){
     if(!node) return [];
     const allowed = new Set(kinds);
-    const ids = new Set(allowed.has('input') ? (node.inputNodeIds || []) : []);
+    const ids = new Set();
     (canvas?.connections || []).forEach(conn => {
         if(conn.to === node.id && allowed.has(conn.kind || 'flow')) ids.add(conn.from);
     });
+    if(!canvasUsesConnections && allowed.has('input')){
+        (node.inputNodeIds || []).forEach(id => ids.add(id));
+    }
     return [...ids].map(id => nodes.find(n => n.id === id)).filter(Boolean);
 }
 function inputNodesFor(node){
@@ -8531,6 +9711,30 @@ function inputNodesFor(node){
 }
 function workflowInputNodesFor(node){
     return upstreamNodesForKinds(node, ['input', 'flow']);
+}
+function clearDetachedRunInputRefs(node){
+    if(!node) return;
+    const hasUpstream = Boolean((canvas?.connections || []).some(conn => conn.to === node.id && ['input','flow'].includes(conn.kind || 'flow')));
+    if(hasUpstream || (!canvasUsesConnections && Array.isArray(node.inputNodeIds) && node.inputNodeIds.some(id => nodes.some(n => n.id === id)))) return;
+    delete node.runInputRefs;
+    delete node.runPromptRefs;
+    delete node.sourceNodeId;
+}
+function cleanupDetachedRunInputRefs(){
+    if(!canvasUsesConnections) return false;
+    let changed = false;
+    nodes.forEach(node => {
+        const hadRefs = Array.isArray(node?.runInputRefs) && node.runInputRefs.length;
+        const hadPromptRefs = Array.isArray(node?.runPromptRefs) && node.runPromptRefs.length;
+        const hadSource = Boolean(node?.sourceNodeId);
+        clearDetachedRunInputRefs(node);
+        if(hadRefs !== (Array.isArray(node?.runInputRefs) && node.runInputRefs.length)
+            || hadPromptRefs !== (Array.isArray(node?.runPromptRefs) && node.runPromptRefs.length)
+            || hadSource !== Boolean(node?.sourceNodeId)){
+            changed = true;
+        }
+    });
+    return changed;
 }
 function imagesForNode(node){
     return (node?.images || []).map((img, index) => ({...imageForDisplay(img), nodeId:node.id, imageIndex:index}));
@@ -8905,7 +10109,7 @@ function renderMentionPicker(source){
     const candidates = (mentionSource === 'asset' ? assetItems : inputItems).slice(0, 36);
     const body = candidates.length ? `<div class="mention-option-grid">${candidates.map((img, i) => `
             <button class="mention-option" type="button" data-mention-index="${i}">
-                ${mediaKindForItem(img) === 'video' ? `<video src="${escapeHtml(img.url)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video>` : `<img src="${escapeHtml(img.url)}" alt="">`}
+                ${mediaKindForItem(img) === 'video' ? smartVideoPreviewHtml(img, 256, 'alt=""') : smartPreviewImgHtml(img, 256, 'alt=""')}
                 <span>${escapeHtml(img.alias)}</span>
             </button>
         `).join('')}</div>` : `<div class="mention-empty">${escapeHtml(tr('smart.mentionEmpty'))}</div>`;
@@ -8938,6 +10142,7 @@ function renderMentionPicker(source){
         </div>
     `;
     mentionPicker._items = candidates;
+    bindSmartPreviewImageFallbacks(mentionPicker);
     positionMentionPickerAtCaret();
     mentionPicker.classList.add('open');
     mentionPicker.querySelectorAll('[data-mention-source]').forEach(btn => {
@@ -9046,9 +10251,10 @@ function insertMentionToken(img){
     token.dataset.imageIndex = String(img.imageIndex ?? '');
     token.dataset.assetUris = JSON.stringify(img.asset_uris || {});
     token.innerHTML = token.dataset.kind === 'video'
-        ? `<video src="${escapeHtml(img.url)}" muted preload="metadata" playsinline disablepictureinpicture controlslist="nodownload noplaybackrate noremoteplayback"></video><span>${escapeHtml(token.dataset.name)}</span>`
-        : `<img src="${escapeHtml(img.url)}" alt=""><span>${escapeHtml(token.dataset.name)}</span>`;
+        ? `${smartVideoPreviewHtml(img, 256, 'alt=""')}<span>${escapeHtml(token.dataset.name)}</span>`
+        : `${smartPreviewImgHtml(img, 256, 'alt=""')}<span>${escapeHtml(token.dataset.name)}</span>`;
     range.insertNode(token);
+    bindSmartPreviewImageFallbacks(token);
     const spacer = document.createTextNode(' ');
     token.after(spacer);
     range.setStartAfter(spacer);
@@ -9220,6 +10426,10 @@ function createParallelLoopOutputNode(templateNode, sourceNode, roundIndex, roun
     delete output.runModelPrompt;
     delete output.runPromptRefs;
     delete output.runInputRefs;
+    // 克隆自模板节点会带上 inputNodeIds（含上游提示词节点），而生成出的输出槽并未真正
+    // 连线到这些上游；若不清空，节点即便没有任何连线也会一直显示"上游输入xxxx"。
+    output.inputNodeIds = [];
+    delete output.blockedInputRefs;
     nodes.push(output);
     connectInputNode(sourceNode.id, output.id);
     return output;
@@ -9282,6 +10492,10 @@ function createLoopOutputSlot(rootNode, roundIndex, roundOffset=0, options={}){
     delete output.runInputRefs;
     delete output.runFinishedAt;
     delete output.runElapsedMs;
+    // 同 createParallelLoopOutputNode：清空克隆带来的 inputNodeIds，否则输出槽虽只用 flow
+    // 连接到 root，却会因继承 root 的 inputNodeIds 而误显示上游提示词输入。
+    output.inputNodeIds = [];
+    delete output.blockedInputRefs;
     tagLoopOutputSlot(output, rootNode, options.loopNode || null, roundIndex, options.slotIndex ?? roundOffset);
     const slots = loopOutputSlotsForRoot(rootNode).map(nodeRect);
     let y = (Number(rootNode.y) || 0) + roundOffset * ((Number(rootRect.height) || 180) + 28);
@@ -9330,7 +10544,7 @@ function finalizePendingNode(pendingNode, urls, meta, kind='image'){
     const imgs = urls.map((item, i) => {
         const url = typeof item === 'string' ? item : item?.url || '';
         const itemKind = (typeof item === 'object' && item.kind) || kind;
-        return {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:itemKind, generatedResult:true};
+        return copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:itemKind, generatedResult:true});
     }).filter(img => img.url);
     pendingNode.images = imgs;
     pendingNode.pending = 0;
@@ -10058,7 +11272,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
     );
     const prompt = (request.prompt || '').trim();
     const displayPrompt = (request.displayPrompt || '').trim();
-    if(!prompt || (!displayPrompt && !(runSettings.engine === 'comfy' && runSettings.comfyMode === 'enhance'))){
+    if((!prompt || !displayPrompt) && smartRunNeedsPrompt(runSettings)){
         settings = previousSettings;
         throw new Error('链路节点缺少提示词');
     }
@@ -10105,7 +11319,7 @@ async function runCascadeStepIntoNode(sourceNode, targetNode, inputRefs, ctx=sma
         const ext = result.kind === 'video' ? 'mp4' : result.kind === 'audio' ? 'mp3' : result.kind === 'text' ? 'txt' : 'png';
         const additions = result.urls.map((item, i) => {
             const url = typeof item === 'string' ? item : item?.url || '';
-            return stripImageGenerationMeta({url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:(typeof item === 'object' && item.kind) || result.kind, generatedResult:true});
+            return stripImageGenerationMeta(copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:(typeof item === 'object' && item.kind) || result.kind, generatedResult:true}));
         }).filter(item => item.url);
         replaceOutputsToNodeWithHistory(outputNode, additions, result.kind, null, {skipShift:Boolean(ctx?.nodeId)});
         outputNode.runPrompt = targetPromptState.runPrompt;
@@ -10148,7 +11362,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
         const request = buildPromptRequestForNode(rootNode, refsForRequest.length ? refsForRequest : null, ctx);
         const prompt = (request.prompt || '').trim();
         const displayPrompt = (request.displayPrompt || '').trim();
-        if(!prompt || (!displayPrompt && !(runSettings.engine === 'comfy' && runSettings.comfyMode === 'enhance'))) throw new Error('链路节点缺少提示词');
+        if((!prompt || !displayPrompt) && smartRunNeedsPrompt(runSettings)) throw new Error('链路节点缺少提示词');
         const meta = {
             prompt,
             displayPrompt:request.displayPrompt || '',
@@ -10194,14 +11408,14 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
                 delete history.h;
                 outputSlot.images = [];
             }
-            outputSlot.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image'}));
+            outputSlot.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:taskResult.providerId, model:taskResult.model}));
             outputSlot.pending = Math.max(taskIds.length, Number(outputSlot.pending || 0) || taskIds.length);
             outputSlot.running = false;
             render();
             scheduleSave();
             await saveCanvas();
             await resumeSmartPendingNode(outputSlot);
-            if(outputSlot.jimengPending){
+            if(outputSlot.jimengPending || smartRecoverableImageTask(outputSlot)){
                 outputSlot.queued = false;
                 return [];
             }
@@ -10218,7 +11432,7 @@ async function runLoopRoundIntoSlot(loopNode, rootNode, outputSlot, loopIndex, c
             const ext = result.kind === 'video' ? 'mp4' : result.kind === 'audio' ? 'mp3' : result.kind === 'text' ? 'txt' : 'png';
             additions = result.urls.map((item, i) => {
                 const url = typeof item === 'string' ? item : item?.url || '';
-                return stripImageGenerationMeta({url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:(typeof item === 'object' && item.kind) || result.kind, generatedResult:true});
+                return stripImageGenerationMeta(copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:(typeof item === 'object' && item.kind) || result.kind, generatedResult:true}));
             }).filter(item => item.url);
             replaceOutputsToNodeWithHistory(outputSlot, additions, result.kind, meta, {skipShift:Boolean(ctx?.nodeId)});
         }
@@ -10533,11 +11747,15 @@ async function runGeneration(){
     const request = buildPromptRequest(node, null, true, smartLoopContext);
     const prompt = request.prompt.trim();
     if(!node) return;
-    if(!prompt){ toast(tr('smart.toastNeedPrompt')); return; }
     const refs = request.refs;
     const previousSettings = cloneSmartSettings(settings);
     const runSettings = smartSettingsForNode(node);
     settings = {...settings, ...cloneSmartSettings(runSettings || {})};
+    if(!prompt && smartRunNeedsPrompt(settings)){
+        settings = previousSettings;
+        toast(tr('smart.toastNeedPrompt'));
+        return;
+    }
     const outpaintSize = node?.outpaintSize && Number(node.outpaintSize.width) > 0 && Number(node.outpaintSize.height) > 0
         ? {width:Math.round(Number(node.outpaintSize.width)), height:Math.round(Number(node.outpaintSize.height))}
         : null;
@@ -10627,7 +11845,7 @@ async function runGeneration(){
         if(isApiLikeEngine(settings.engine)){
             const taskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
-            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image'}));
+            pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model}));
             pendingNode.pending = Math.max(taskIds.length, Number(pendingNode.pending || 0) || taskIds.length);
             pendingNode.runStartedAt = nowMs();
             pendingNode.runTimerHidden = false;
@@ -10636,7 +11854,7 @@ async function runGeneration(){
             scheduleSave();
             await saveCanvas();
             await resumeSmartPendingNode(pendingNode);
-            if(pendingNode.jimengPending){
+            if(pendingNode.jimengPending || smartRecoverableImageTask(pendingNode)){
                 if(sourceVisualState) restoreSourceVisualState(node, sourceVisualState);
                 clearPromptInput({preserveDraft:true});
                 settings = previousSettings;
@@ -10750,7 +11968,7 @@ async function runApiGeneration(prompt, refs, runSettings=settings){
         if(!r.ok) throw new Error(await r.text());
         return r.json();
     })));
-    return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count};
+    return {taskIds:tasks.map(task => task.task_id).filter(Boolean), count, providerId:payload.provider_id, model:payload.model};
 }
 async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     const ref = selectedRunningHubRef(runSettings);
@@ -11043,6 +12261,21 @@ class JimengPendingSignal extends Error {
         this.queueInfo = data.queueInfo || data.queue_info || {};
     }
 }
+class ImageTaskRecoverSignal extends Error {
+    constructor(info){
+        const data = info || {};
+        super(data.message || '任务未丢失，可稍后手动查询结果');
+        this.imageTaskRecover = true;
+        this.taskId = data.taskId || data.task_id || '';
+        this.recoverTaskId = data.recoverTaskId || data.upstream_task_id || data.task_id || '';
+        this.providerId = data.providerId || data.provider_id || '';
+        this.kind = data.kind || 'image';
+    }
+}
+function extractUpstreamTaskId(text){
+    const match = String(text || '').match(/(?:task_id|taskId|task id)\s*[=:：]\s*([A-Za-z0-9_.:-]+)/i);
+    return match ? match[1] : '';
+}
 const activeJimengPolls = new Set();
 const JIMENG_POLL_INTERVAL = 60000;
 const JIMENG_POLL_MAX = 1440;
@@ -11088,7 +12321,7 @@ function finalizeJimengPending(node, urls, kind='image'){
     const additions = (urls || []).map((item, i) => {
         const url = typeof item === 'string' ? item : item?.url || '';
         const itemKind = (typeof item === 'object' && item.kind) || kind;
-        return stripImageGenerationMeta({url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:itemKind, generatedResult:true});
+        return stripImageGenerationMeta(copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:itemKind, generatedResult:true}));
     }).filter(item => item.url);
     if(!additions.length) return false;
     delete node.jimengPending;
@@ -11152,6 +12385,59 @@ async function queryJimengNow(nodeId){
         render();
     }
 }
+function providerIdForSmartTask(node, task){
+    return task?.providerId || node?.runSettings?.provider_id || settings.provider_id || 'comfly';
+}
+async function fetchImageTaskQuery(providerId, taskId){
+    return fetch('/api/image-task-query', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({provider_id:providerId || 'comfly', task_id:taskId})
+    }).then(async r => {
+        if(!r.ok) throw new Error(await r.text());
+        return r.json();
+    });
+}
+async function querySmartImageTaskNow(nodeId, localTaskId){
+    const node = nodes.find(n => n.id === nodeId);
+    if(!node) return;
+    const task = smartPendingTasks(node).find(item => item.taskId === localTaskId) || smartRecoverableImageTask(node);
+    if(!task || task.querying) return;
+    const recoverTaskId = task.recoverTaskId || extractUpstreamTaskId(task.error || '');
+    if(!recoverTaskId){
+        toast('没有任务 ID，无法查询');
+        return;
+    }
+    task.querying = true;
+    task.recoverTaskId = recoverTaskId;
+    render();
+    try {
+        const data = await fetchImageTaskQuery(providerIdForSmartTask(node, task), recoverTaskId);
+        if(data.status === 'succeeded'){
+            task.failed = false;
+            task.querying = false;
+            finalizeSmartPendingTask(node, task.taskId, data.images || [], task.kind || 'image');
+            render();
+            scheduleSave();
+            return;
+        }
+        if(data.status === 'failed'){
+            task.error = data.error || tr('smart.errRunFailed');
+            toast(task.error.slice(0, 160));
+        } else {
+            task.error = data.message || '任务仍在生成中，请稍后再查询';
+            toast(task.error);
+        }
+    } catch(e){
+        task.error = e.message || '查询失败';
+        toast(task.error.slice(0, 160));
+    } finally {
+        const latest = smartPendingTasks(node).find(item => item.taskId === localTaskId);
+        if(latest) latest.querying = false;
+        render();
+        scheduleSave();
+    }
+}
 function startJimengPoll(node){
     if(!node || !node.jimengPending || !node.jimengPending.submitId) return;
     const submitId = node.jimengPending.submitId;
@@ -11197,7 +12483,11 @@ async function pollSmartCanvasTask(taskId){
             });
             if(task.status === 'succeeded') return task.result || {};
             if(task.status === 'jimeng_pending') throw new JimengPendingSignal({submitId:task.submit_id, kind:task.kind, queueInfo:task.queue_info, message:task.message});
-            if(task.status === 'failed') throw new Error(task.error || tr('smart.errRunFailed'));
+            if(task.status === 'failed'){
+                const recoverTaskId = task.upstream_task_id || extractUpstreamTaskId(task.error || '');
+                if(recoverTaskId) throw new ImageTaskRecoverSignal({taskId, recoverTaskId, providerId:task.provider_id, kind:'image', message:task.error || tr('smart.errRunFailed')});
+                throw new Error(task.error || tr('smart.errRunFailed'));
+            }
         }
         throw new Error(tr('smart.errRunTimeout'));
     })();
@@ -11216,7 +12506,7 @@ function finalizeSmartPendingTask(node, taskId, images, kind='image'){
     const additions = (images || []).map((item, i) => {
         const url = typeof item === 'string' ? item : item?.url || '';
         const itemKind = (typeof item === 'object' && item.kind) || kind;
-        return stripImageGenerationMeta({url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:itemKind, generatedResult:true});
+        return stripImageGenerationMeta(copyMediaSizeFields(item, {url, name:(typeof item === 'object' && item.name) || `output-${i + 1}.${ext}`, kind:itemKind, generatedResult:true}));
     }).filter(item => item.url);
     node.images = [...(node.images || []).map(img => stripImageGenerationMeta(img)), ...additions];
     if(additions.length) node.outputKind = kind;
@@ -11241,6 +12531,7 @@ async function resumeSmartPendingNode(node){
     render();
     const failures = [];
     await Promise.all(tasks.map(async task => {
+        if(task.failed && task.recoverTaskId) return;
         try {
             const result = await pollSmartCanvasTask(task.taskId);
             finalizeSmartPendingTask(node, task.taskId, result?.images || [], task.kind || 'image');
@@ -11250,6 +12541,19 @@ async function resumeSmartPendingNode(node){
             if(e && e.jimengPending && e.submitId){
                 node.pendingTasks = smartPendingTasks(node).filter(item => item.taskId !== task.taskId);
                 setNodeJimengPending(node, e);
+                render();
+                scheduleSave();
+                return;
+            }
+            if(e && e.imageTaskRecover && e.recoverTaskId){
+                task.failed = true;
+                task.querying = false;
+                task.recoverTaskId = e.recoverTaskId;
+                task.providerId = e.providerId || task.providerId || providerIdForSmartTask(node, task);
+                task.error = e.message || tr('smart.errRunFailed');
+                node.running = false;
+                node.pending = Math.max(1, smartPendingTasks(node).length);
+                toast('任务未丢失，可稍后手动查询结果');
                 render();
                 scheduleSave();
                 return;
@@ -11357,6 +12661,7 @@ function ungroupNode(groupId){
             created_at:Date.now()
         };
         inheritNodeMetaFromImage(node);
+        clearDetachedRunInputRefs(node);
         return node;
     });
     nodes = nodes.filter(n => n.id !== groupId);
@@ -11426,14 +12731,14 @@ function createNodeFromMenu(type){
 shell.addEventListener('mousedown', e => {
     if(!zoomPreviewState) return;
     if(e.button !== 0) return;
-    if(e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
+    if(e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
     e.preventDefault();
     e.stopPropagation();
 }, true);
 shell.addEventListener('click', e => {
     if(!zoomPreviewState) return;
     if(e.button !== 0) return;
-    if(e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
+    if(e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
     e.preventDefault();
     e.stopPropagation();
     const nodeEl = e.target.closest('.image-node');
@@ -11441,8 +12746,8 @@ shell.addEventListener('click', e => {
     else exitZoomPreview(screenToWorld(e));
 }, true);
 shell.onmousedown = e => {
-    if(zoomPreviewState && e.button === 0 && !e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
-    if(e.target.closest('.image-node,.composer,.smart-back,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal,.create-menu,.smart-minimap')) return;
+    if(zoomPreviewState && e.button === 0 && !e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
+    if(e.target.closest('.image-node,.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.create-menu,.smart-minimap')) return;
     closeCreateMenu();
     if(e.button === 0 && isRKeyDown){
         e.preventDefault();
@@ -11472,14 +12777,14 @@ shell.oncontextmenu = e => {
     }
 };
 shell.ondblclick = e => {
-    if(didPan || e.target.closest('.image-node,.composer,.smart-back,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu')) return;
+    if(didPan || e.target.closest('.image-node,.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu')) return;
     if(document.getElementById('imageEditModal')?.classList.contains('open')) return;
     e.preventDefault();
     openCreateMenu(e);
 };
 shell.onclick = e => {
     if(selectionJustFinished) return;
-    if(didPan || e.target.closest('.image-node,.composer,.smart-back,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu')) return;
+    if(didPan || e.target.closest('.image-node,.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu')) return;
     if(document.getElementById('imageEditModal')?.classList.contains('open')) return;
     closeCreateMenu();
     clearSelection();
@@ -11601,6 +12906,21 @@ window.onmousemove = e => {
         updateNodeElementDuringResize(node);
         return;
     }
+    if(llmInstructionResizeState){
+        const node = nodes.find(n => n.id === llmInstructionResizeState.id);
+        if(!node) return;
+        const dy = (e.clientY - llmInstructionResizeState.startY) / viewport.scale;
+        const newInstrH = Math.max(PROMPT_LLM_INSTRUCTION_MIN_H, Math.min(PROMPT_LLM_INSTRUCTION_MAX_H, Math.round(llmInstructionResizeState.startH + dy)));
+        node.llmInstructionHeight = newInstrH;
+        // 只把“指令框的高度变化量”叠加到节点总高度上，保留用户手动拉大的上方区域，避免上方被重置变小。
+        node.h = Math.max(promptNodeExpandedHeight(node), Math.round(llmInstructionResizeState.startNodeH + (newInstrH - llmInstructionResizeState.startH)));
+        node.w = Math.max(Number(node.w) || 0, 316);
+        node.scale = 1;
+        updateNodeElementDuringResize(node);
+        const ta = world.querySelector(`.image-node[data-id="${CSS.escape(node.id)}"] .prompt-llm-instruction`);
+        if(ta) ta.style.height = `${promptLlmInstructionHeight(node)}px`;
+        return;
+    }
     if(thumbDragState){
         const dx = e.clientX - thumbDragState.startX;
         const dy = e.clientY - thumbDragState.startY;
@@ -11711,6 +13031,15 @@ window.onmouseup = e => {
         if(changed) render();
         scheduleSave();
     }
+    if(llmInstructionResizeState){
+        const node = nodes.find(n => n.id === llmInstructionResizeState.id);
+        const changed = node && promptLlmInstructionHeight(node) !== llmInstructionResizeState.startH;
+        document.body.classList.remove('smart-node-resize', 'smart-llm-instr-resize');
+        if(changed) commitPendingUndo(); else discardPendingUndo();
+        llmInstructionResizeState = null;
+        render();
+        scheduleSave();
+    }
     if(thumbDragState){
         if(!thumbDragState.detached) discardPendingUndo();
         thumbDragState = null;
@@ -11749,9 +13078,20 @@ window.onmouseup = e => {
         const insertHit = draggedNode?.type === 'smart-loop' && dragState.ctrlGroup && (dragState.group || []).length <= 1
             ? insertionConnectionForNode(draggedNode)
             : null;
+        const draggedRect = draggedNode ? nodeRect(draggedNode) : null;
+        const groupTarget = draggedNode && (draggedNode.images || []).length && (dragState.group || []).length <= 1 && draggedRect
+            ? rectOverlapNode(draggedNode.id, draggedRect.x, draggedRect.y, draggedRect.width, draggedRect.height, dragState.groupIds)
+            : null;
         if(
             insertHit &&
             insertLoopNodeIntoConnection(draggedNode, insertHit)
+        ){
+            stateChanged = true;
+            render();
+        } else if(
+            groupTarget &&
+            (groupTarget.images || []).length > 1 &&
+            mergeImageNodesIntoGroup(draggedNode.id, groupTarget.id)
         ){
             stateChanged = true;
             render();
@@ -11804,7 +13144,7 @@ window.onmouseup = e => {
     }
 };
 shell.addEventListener('wheel', e => {
-    if(e.target.closest('.composer,.smart-back,.image-edit-modal,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.log-modal,.shortcut-modal')) return;
+    if(e.target.closest('.composer,.smart-back,.image-edit-modal,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.workflow-transfer-panel,.log-modal,.shortcut-modal,[data-thumb-scroll]')) return;
     e.preventDefault();
     const rect = shell.getBoundingClientRect();
     const sx = e.clientX - rect.left;
@@ -11844,6 +13184,11 @@ window.addEventListener('paste', e => {
         handleFiles(files, selectedId);
         return;
     }
+    // 素材库管理页「复制到画布」过来的素材：Ctrl+V 批量粘贴成图片节点
+    if(!isEditableTarget(e.target) && pasteAssetsFromInbox()){
+        e.preventDefault();
+        return;
+    }
     if(nodeClipboard?.nodes?.length && !isEditableTarget(e.target)){
         e.preventDefault();
         pasteNodes();
@@ -11852,7 +13197,7 @@ window.addEventListener('paste', e => {
 window.addEventListener('keydown', e => {
     const key = String(e.key || '').toLowerCase();
     if(key === 'r' && !isEditableTarget(e.target)) isRKeyDown = true;
-    if(imageEditModal.classList.contains('open') && !isEditableTarget(e.target)){
+    if(imageEditModal.classList.contains('open') && imageEditMode === 'preview' && !isEditableTarget(e.target)){
         if(e.key === 'ArrowLeft' || e.key === 'ArrowRight'){
             e.preventDefault();
             if(!seekPreviewVideoFrames(e.key === 'ArrowLeft' ? -1 : 1)){
@@ -11990,6 +13335,69 @@ fileInput.onchange = () => {
 };
 if(assetToggle) assetToggle.onclick = () => toggleAssetLibrary();
 if(assetCloseBtn) assetCloseBtn.onclick = () => toggleAssetLibrary(false);
+if(smartWorkflowToggle) smartWorkflowToggle.onclick = event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if(smartWorkflowTransferModal?.classList.contains('open')) closeSmartWorkflowTransferModal();
+    else openSmartWorkflowTransferModal();
+};
+smartWorkflowImportInput?.addEventListener('change', event => {
+    const file = event.target.files?.[0];
+    if(file) importSmartWorkflowFile(file);
+    event.target.value = '';
+});
+smartWorkflowImportDropZone?.addEventListener('click', () => smartWorkflowImportInput?.click());
+smartWorkflowImportDropZone?.addEventListener('dragenter', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    smartWorkflowImportDropZone.classList.add('drag-over');
+});
+smartWorkflowImportDropZone?.addEventListener('dragover', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    smartWorkflowImportDropZone.classList.add('drag-over');
+});
+smartWorkflowImportDropZone?.addEventListener('dragleave', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if(!smartWorkflowImportDropZone.contains(event.relatedTarget)) smartWorkflowImportDropZone.classList.remove('drag-over');
+});
+smartWorkflowImportDropZone?.addEventListener('drop', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    smartWorkflowImportDropZone.classList.remove('drag-over');
+    const file = [...(event.dataTransfer?.files || [])].find(item => /\.(json|zip)$/i.test(item.name || ''));
+    if(file) importSmartWorkflowFile(file);
+    else toast('请拖入 JSON 或 ZIP 工作流文件');
+});
+smartWorkflowTransferModal?.addEventListener('pointerdown', e => e.stopPropagation());
+smartWorkflowTransferModal?.addEventListener('mousedown', e => e.stopPropagation());
+smartWorkflowTransferModal?.addEventListener('click', e => e.stopPropagation());
+smartWorkflowTransferModal?.addEventListener('wheel', event => {
+    event.stopPropagation();
+}, {passive:true, capture:true});
+smartWorkflowTransferModal?.addEventListener('dragover', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if(smartWorkflowImportDropZone){
+        event.dataTransfer.dropEffect = 'copy';
+        smartWorkflowImportDropZone.classList.add('drag-over');
+    }
+});
+smartWorkflowTransferModal?.addEventListener('dragleave', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if(!smartWorkflowTransferModal.contains(event.relatedTarget)) smartWorkflowImportDropZone?.classList.remove('drag-over');
+});
+smartWorkflowTransferModal?.addEventListener('drop', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    smartWorkflowImportDropZone?.classList.remove('drag-over');
+    const file = [...(event.dataTransfer?.files || [])].find(item => /\.(json|zip)$/i.test(item.name || ''));
+    if(file) importSmartWorkflowFile(file);
+    else toast('请拖入 JSON 或 ZIP 工作流文件');
+});
 assetPanel?.addEventListener('pointerdown', e => e.stopPropagation());
 assetPanel?.addEventListener('mousedown', e => e.stopPropagation());
 assetPanel?.addEventListener('click', e => e.stopPropagation());
@@ -12058,10 +13466,17 @@ promptTemplatePanel?.addEventListener('click', e => {
 if(promptPresetClose) promptPresetClose.onclick = closePromptPresetPanel;
 if(promptTemplateClose) promptTemplateClose.onclick = closePromptTemplatePanel;
 if(promptTemplateSearch) promptTemplateSearch.oninput = () => renderPromptTemplatePanel({preserveScroll:false});
-if(promptTemplateLibrarySelect) promptTemplateLibrarySelect.onchange = () => {
+if(promptTemplateLibrarySelect) promptTemplateLibrarySelect.onchange = async () => {
     activePromptLibraryId = promptTemplateLibrarySelect.value || 'system';
     promptTemplateSelectedId = '';
+    // 切换词库必须重置分类筛选，否则上一个库的分类（如系统的“视角”）会把新库内容过滤为空。
+    promptTemplateCategory = 'all';
     promptTemplateEditing = false;
+    // 拉取最新数据，确保素材库管理里新建/新增的词库与提示词在画布即时可见。
+    const want = activePromptLibraryId;
+    try { await loadPromptTemplates(); } catch(e){}
+    if(promptLibraries.some(lib => lib.id === want)) activePromptLibraryId = want;
+    renderPromptLibrarySelect();
     renderPromptTemplatePanel({preserveScroll:false});
 };
 if(composerTemplateBtn) composerTemplateBtn.onclick = event => {
@@ -12134,28 +13549,42 @@ if(promptPresetDelete) promptPresetDelete.onclick = () => {
     scheduleSave();
 };
 document.querySelectorAll('[data-asset-tab]').forEach(btn => {
-    btn.onclick = () => { assetTab = btn.dataset.assetTab; renderAssetLibrary(); };
+    btn.onclick = () => {
+        assetTab = btn.dataset.assetTab;
+        if(assetTab === 'workflow' && assetLibraryIsLocal()){
+            activeAssetLibraryId = assetLibrary.active_library_id || assetLibraries()[0]?.id || '';
+        }
+        renderAssetLibrary();
+    };
 });
 if(assetLibrarySelect) assetLibrarySelect.onchange = () => {
     activeAssetLibraryId = assetLibrarySelect.value || '';
     activeAssetCategoryId = '';
+    activeWorkflowAssetCategoryId = '';
     mentionAssetCategoryId = '';
+    if(activeAssetLibraryId === LOCAL_ASSET_LIBRARY_ID) assetTab = 'image';
     renderAssetLibrary();
 };
-if(assetCategorySelect) assetCategorySelect.onchange = () => { activeAssetCategoryId = assetCategorySelect.value; renderAssetLibrary(); };
-const assetAddCategoryBtn = document.getElementById('assetAddCategoryBtn');
+if(assetCategorySelect) assetCategorySelect.onchange = () => {
+    if(assetTab === 'workflow') activeWorkflowAssetCategoryId = assetCategorySelect.value;
+    else activeAssetCategoryId = assetCategorySelect.value;
+    renderAssetLibrary();
+};
 if(assetAddCategoryBtn) assetAddCategoryBtn.onclick = async () => {
-    const name = await openAssetNameDialog({title:tr('smart.assetNewFolder'), value:tr('smart.assetFolder'), placeholder:tr('smart.assetFolder')});
+    if(assetLibraryIsLocal()){ toast('本地素材请在素材库管理中管理文件夹'); return; }
+    const workflowMode = currentAssetTabIsWorkflow();
+    const fallbackName = workflowMode ? '工作流' : tr('smart.assetFolder');
+    const name = await openAssetNameDialog({title:tr('smart.assetNewFolder'), value:fallbackName, placeholder:fallbackName});
     if(!name) return;
-    const data = await fetch('/api/asset-library/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeAssetLibraryId, name, type:'image'})}).then(r => r.json());
-    activeAssetCategoryId = data.category?.id || activeAssetCategoryId;
+    const data = await fetch('/api/asset-library/categories', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({library_id:activeAssetLibraryId, name, type:workflowMode ? 'workflow' : 'image'})}).then(r => r.json());
+    setActiveAssetTabCategory(data.category?.id || '');
     setAssetLibraryFromResponse(data);
 };
-const assetRenameCategoryBtn = document.getElementById('assetRenameCategoryBtn');
 if(assetRenameCategoryBtn) assetRenameCategoryBtn.onclick = async () => {
-    const cat = activeAssetCategory();
+    if(assetLibraryIsLocal()){ toast('本地素材请在素材库管理中管理文件夹'); return; }
+    const cat = activeAssetTabCategory();
     if(!cat) return;
-    const name = await openAssetNameDialog({title:tr('smart.assetRenameFolder'), value:cat.name || '', placeholder:tr('smart.assetFolder')});
+    const name = await openAssetNameDialog({title:tr('smart.assetRenameFolder'), value:cat.name || '', placeholder:currentAssetTabIsWorkflow() ? '工作流' : tr('smart.assetFolder')});
     if(!name) return;
     const data = await fetch(`/api/asset-library/categories/${encodeURIComponent(cat.id)}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name})}).then(r => r.json());
     setAssetLibraryFromResponse(data);
@@ -12405,6 +13834,11 @@ document.getElementById('editDrawCanvas').addEventListener('pointermove', moveEd
 document.getElementById('editDrawCanvas').addEventListener('pointerup', endEditDraw);
 document.getElementById('editDrawCanvas').addEventListener('pointercancel', endEditDraw);
 document.getElementById('editDrawCanvas').addEventListener('pointerleave', endEditDraw);
+document.getElementById('gridJoinCanvas')?.addEventListener('pointerdown', beginGridJoinDrag);
+document.getElementById('gridJoinCanvas')?.addEventListener('pointermove', moveGridJoinDrag);
+document.getElementById('gridJoinCanvas')?.addEventListener('pointerup', endGridJoinDrag);
+document.getElementById('gridJoinCanvas')?.addEventListener('pointercancel', endGridJoinDrag);
+document.getElementById('gridJoinCanvas')?.addEventListener('pointerleave', endGridJoinDrag);
 document.getElementById('editTextCanvas')?.addEventListener('pointerdown', beginEditText);
 document.getElementById('editTextCanvas')?.addEventListener('pointermove', moveEditText);
 document.getElementById('editTextCanvas')?.addEventListener('pointerup', endEditText);
@@ -12472,6 +13906,24 @@ document.getElementById('imageEditStage').addEventListener('wheel', event => {
             previewPan.y -= originY * (ratio - 1);
         }
         applyPreviewTransform();
+        return;
+    }
+    if(imageEditMode === 'grid' && gridOperationMode === 'join'){
+        const stage = event.currentTarget;
+        const oldZoom = imageEditZoom;
+        const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+        imageEditZoom = Math.max(0.15, Math.min(6.0, imageEditZoom * factor));
+        const stageRect = stage.getBoundingClientRect();
+        const mx = event.clientX - stageRect.left;
+        const my = event.clientY - stageRect.top;
+        const contentX = stage.scrollLeft + mx;
+        const contentY = stage.scrollTop + my;
+        const scale = imageEditZoom / oldZoom;
+        refreshGridSplitPreview();
+        syncImageEditOverflow();
+        updateZoomLabel();
+        stage.scrollLeft = contentX * scale - mx;
+        stage.scrollTop = contentY * scale - my;
         return;
     }
     const stage = event.currentTarget;
