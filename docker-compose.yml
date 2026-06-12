@@ -15,6 +15,11 @@ services:
       - ./API:/app/API
       # 挂载输出目录（若有）
       - ./output:/app/output
+      # 挂载工作流目录，防止上传的自定义 ComfyUI 工作流丢失
+      - ./workflows:/app/workflows
+    # 允许容器通过 host.docker.internal 访问宿主机上运行的服务（例如宿主机本地的 ComfyUI）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
