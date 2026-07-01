@@ -1,14 +1,26 @@
 {
-  "version": "2026.06.10.1",
-  "updated_at": "2026-06-10T15:42:04+08:00",
+  "version": "2026.06.29",
+  "updated_at": "2026-06-30T20:36:36+08:00",
   "items": [
     {
       "type": "feature",
-      "text": "支持 Agnes 图像/视频/LLM生成"
+      "text": "新增 OpenAI Codex CLI 平台"
     },
     {
       "type": "feature",
-      "text": "画布首次打开加载低分辨率缩略图和视频缩略图，极大提升了流畅度"
+      "text": "图片编辑新增缩放原图"
+    },
+    {
+      "type": "feature",
+      "text": "Alt 复制支持保留连线"
+    },
+    {
+      "type": "update",
+      "text": "图片节点标题可显示改名"
+    },
+    {
+      "type": "feature",
+      "text": "生成完成新增提示音"
     }
   ]
 }

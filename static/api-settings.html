@@ -15,12 +15,12 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.06.9.1779672342"></script>
-    <script src="/static/vendor/js/lucide.js?v=2026.06.9.1779672342"></script>
-    <script src="/static/js/theme.js?v=2026.06.9.1780456238"></script>
-    <script src="/static/js/i18n.js?v=2026.06.9.1780902932"></script>
-    <link rel="stylesheet" href="/static/css/theme.css?v=2026.06.9.1779672341">
-    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.06.9.1781076870">
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.06.29.1782696751"></script>
+    <script src="/static/vendor/js/lucide.js?v=2026.06.29.1782696749"></script>
+    <script src="/static/js/theme.js?v=2026.06.29.1782696718"></script>
+    <script src="/static/js/i18n.js?v=2026.06.29.1782699985"></script>
+    <link rel="stylesheet" href="/static/css/theme.css?v=2026.06.29.1782696682">
+    <link rel="stylesheet" href="/static/css/api-settings.css?v=2026.06.29.1782737951">
 </head>
 <body>
     <div class="page">
@@ -78,6 +78,9 @@
                                 </div>
                                 <div class="runninghub-hint">
                                     <span class="ms-line">国外地址：<span class="inline-code">https://www.runninghub.ai</span></span>
+                                </div>
+                                <div class="apimart-hint">
+                                    <span class="ms-line">国内请求地址：<span class="inline-code">https://apib.ai</span></span>
                                 </div>
                                 <div class="volcengine-hint">
                                     <span class="ms-line">方舟默认请求地址：<span class="inline-code">https://ark.cn-beijing.volces.com/api/v3</span></span>
@@ -212,6 +215,20 @@
                                 <div id="jimengCredit" class="jimeng-credit"></div>
                                 <div id="jimengLoginBox" class="jimeng-output" hidden></div>
                             </div>
+                            <div id="codexCliPanel" class="jimeng-cli-panel" hidden>
+                                <div class="jimeng-cli-head">
+                                    <div>
+                                        <div class="rh-key-title">OpenAI CLI 账户</div>
+                                        <div class="rh-key-desc">使用本机 codex 登录态，无需在本项目保存 API Key。</div>
+                                    </div>
+                                    <div id="codexCliStatus" class="jimeng-status-pill">未检测</div>
+                                </div>
+                                <div class="jimeng-actions">
+                                    <button class="action-btn primary-btn" type="button" onclick="refreshCodexStatus()"><i data-lucide="radar" class="w-3.5 h-3.5"></i><span>检测 CLI</span></button>
+                                    <button class="action-btn" type="button" onclick="openCodexHelp()"><i data-lucide="terminal" class="w-3.5 h-3.5"></i><span>帮助</span></button>
+                                </div>
+                                <div id="codexCliInfo" class="jimeng-credit"></div>
+                            </div>
                             <!-- 验证操作行 -->
                             <div class="verify-action-row">
                                 <button id="testUrlBtn" class="action-btn" type="button" onclick="testConnection()">
@@ -226,7 +243,9 @@
                                         <option value="apimart" data-i18n="api.protocolApimart">异步协议</option>
                                         <option value="gemini" data-i18n="api.protocolGemini">Gemini 协议</option>
                                         <option value="volcengine">方舟/Ark 任务协议</option>
+                                        <option value="runninghub">RunningHub OpenAPI</option>
                                         <option value="jimeng">即梦 CLI</option>
+                                        <option value="codex">OpenAI Codex CLI</option>
                                     </select>
                                 </div>
                                 <div class="field-frame image-request-mode-wrap">
@@ -429,6 +448,32 @@
         </div>
     </div>
 
+    <div id="codexHelpOverlay" class="picker-overlay">
+        <div class="picker-modal jimeng-help-modal">
+            <div class="picker-head">
+                <div>
+                    <div class="picker-title">OpenAI Codex CLI 帮助</div>
+                    <div class="picker-count">查看 codex 官方命令帮助输出</div>
+                </div>
+                <div class="picker-close" onclick="closeCodexHelp()"><i data-lucide="x" class="w-4 h-4"></i></div>
+            </div>
+            <div class="jimeng-help-toolbar">
+                <select id="codexHelpCommand">
+                    <option value="">codex</option>
+                    <option value="exec">exec</option>
+                    <option value="login">login</option>
+                    <option value="logout">logout</option>
+                    <option value="doctor">doctor</option>
+                    <option value="mcp">mcp</option>
+                    <option value="app">app</option>
+                    <option value="update">update</option>
+                </select>
+                <button class="action-btn primary-btn" type="button" onclick="loadCodexHelp()"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i><span>刷新</span></button>
+            </div>
+            <pre id="codexHelpOutput" class="jimeng-help-output"></pre>
+        </div>
+    </div>
+
     <div id="rhWorkflowEditorOverlay" class="rh-workflow-editor-overlay">
         <div class="rh-workflow-editor-modal">
             <div class="rh-workflow-editor-head">
@@ -470,6 +515,6 @@
         </div>
     </div>
 
-    <script src="/static/js/api-settings.js?v=2026.06.9.1781076831"></script>
+    <script src="/static/js/api-settings.js?v=2026.06.29.1782821137"></script>
 </body>
 </html>
