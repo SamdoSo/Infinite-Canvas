@@ -32,6 +32,14 @@ API/
 history.json
 global_config.json
 
+# Build artifacts
+deploy/
+dist/
+build/
+*.tar
+*.tar.gz
+*.zip
+
 # IDEs
 .vscode/
 .idea/

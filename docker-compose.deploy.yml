@@ -1,8 +1,16 @@
+# ============================================================
+# Infinite-Canvas 服务器部署用 docker-compose
+# ============================================================
+# 使用方法：
+#   1. 将本文件重命名为 docker-compose.yml（或直接使用）
+#   2. 将 .env 文件放在同级目录
+#   3. 将导出的镜像 tar.gz 文件 load 进去：docker load -i infinite-canvas-xxx.tar.gz
+#   4. 启动：docker compose up -d
+# ============================================================
+
 services:
   infinite-canvas:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: infinite-canvas:latest
     container_name: infinite-canvas
     ports:
       - "3000:3000"
@@ -13,11 +21,11 @@ services:
       - ./assets:/app/assets
       # 挂载 .env 配置文件，持久化 API Key 等环境变量
       - ./.env:/app/.env
-      # 挂载输出目录（若有）
+      # 挂载输出目录
       - ./output:/app/output
       # 挂载工作流目录，防止上传的自定义 ComfyUI 工作流丢失
       - ./workflows:/app/workflows
-    # 允许容器通过 host.docker.internal 访问宿主机上运行的服务（例如宿主机本地的 ComfyUI）
+    # 允许容器通过 host.docker.internal 访问宿主机上运行的服务
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
