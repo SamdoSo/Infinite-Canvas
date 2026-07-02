@@ -61,6 +61,24 @@
         .masonry-item { aspect-ratio:1/1; border-radius:24px; overflow:hidden; background:#fff; border:1px solid #f1f5f9; transition:all .5s var(--easing); }
         .masonry-item:hover { transform:translateY(-6px); box-shadow:0 20px 40px rgba(0,0,0,.08); }
         .gallery-lightbox { background:rgba(255,255,255,.99); backdrop-filter:blur(22px) saturate(1.05); }
+        .output-grid { display:grid; gap:16px; padding:24px; width:100%; height:100%; }
+        .output-grid.single { grid-template-columns:1fr; place-items:center; }
+        .output-grid.multi { grid-template-columns:repeat(2,1fr); grid-auto-rows:1fr; }
+        .output-grid img { width:100%; height:100%; object-fit:contain; cursor:zoom-in; border-radius:16px; background:#f8fafc; transition:transform .3s var(--easing); }
+        .output-grid.multi img { object-fit:cover; aspect-ratio:1/1; }
+        .output-grid img:hover { transform:scale(1.02); }
+        .history-thumbs { display:grid; gap:2px; width:100%; height:100%; }
+        .history-thumbs.count-1 { grid-template-columns:1fr; }
+        .history-thumbs.count-2 { grid-template-columns:1fr 1fr; }
+        .history-thumbs.count-3 { grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; }
+        .history-thumbs.count-3 img:nth-child(1) { grid-row:span 2; }
+        .history-thumbs.count-4 { grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; }
+        .history-thumbs img { width:100%; height:100%; object-fit:cover; display:block; }
+        .lightbox-nav { position:absolute; top:50%; transform:translateY(-50%); width:48px; height:48px; border-radius:999px; background:rgba(0,0,0,.6); color:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:20; transition:background .2s; }
+        .lightbox-nav:hover { background:#000; }
+        .lightbox-nav.prev { left:20px; }
+        .lightbox-nav.next { right:20px; }
+        .lightbox-page { position:absolute; bottom:20px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,.6); color:#fff; padding:6px 14px; border-radius:999px; font-size:11px; font-weight:700; pointer-events:none; z-index:10; }
         @keyframes fadeIn { from{opacity:0} to{opacity:1} }
     </style>
     <link rel="stylesheet" href="/static/css/theme.css?v=2026.06.29.1782696682">
@@ -198,7 +216,7 @@
                 <div id="resultBox" class="result-frame min-h-[500px] lg:h-full flex items-center justify-center relative overflow-hidden">
                     <div id="placeholder" class="text-center space-y-4 opacity-20"><i data-lucide="layout" class="w-12 h-12 mx-auto stroke-[1px]"></i><p class="text-[10px] font-black tracking-[0.5em] uppercase" data-i18n="online.canvasReady">Canvas Ready</p></div>
                     <div id="loader" class="hidden text-center space-y-4"><div class="w-8 h-8 border-2 border-black border-t-transparent rounded-full animate-spin mx-auto"></div><p class="text-[10px] font-black tracking-[0.5em] uppercase" data-i18n="online.generating">Generating</p></div>
-                    <img id="outputImg" class="hidden w-full h-full object-contain p-8 cursor-zoom-in" onclick="zoomImage()">
+                    <div id="outputGrid" class="hidden output-grid single"></div>
                     <a id="downloadBtn" href="#" download class="hidden absolute top-8 right-8 w-12 h-12 bg-white/90 shadow-2xl rounded-2xl flex items-center justify-center hover:bg-black hover:text-white"><i data-lucide="download" class="w-4 h-4"></i></a>
                 </div>
             </div>
@@ -213,9 +231,12 @@
 
     <div id="lightbox" onclick="handleOutsideClick(event)" class="hidden fixed inset-0 z-50 gallery-lightbox flex flex-col items-center justify-center p-8">
         <button onclick="closeLightbox()" class="absolute top-10 right-10 text-gray-400 hover:text-black"><i data-lucide="x" class="w-8 h-8"></i></button>
+        <button id="lightboxPrev" onclick="lightboxNavigate(-1,event)" class="lightbox-nav prev hidden"><i data-lucide="chevron-left" class="w-6 h-6"></i></button>
+        <button id="lightboxNext" onclick="lightboxNavigate(1,event)" class="lightbox-nav next hidden"><i data-lucide="chevron-right" class="w-6 h-6"></i></button>
         <div class="w-full flex flex-col items-center pointer-events-none" style="max-width:min(1280px, 92vw)">
             <div id="lightboxFrame" class="studio-preview-frame pointer-events-auto">
                 <img id="lightboxImg" class="studio-preview-img" alt="preview">
+                <div id="lightboxPageIndicator" class="lightbox-page hidden">1 / 1</div>
                 <div data-no-pan class="absolute top-6 left-6 bg-black/50 backdrop-blur-md text-white px-3 py-1.5 rounded-xl text-[10px] font-black tracking-widest shadow-2xl pointer-events-auto z-10">
                     <span id="lightboxRes">0x0</span>
                 </div>
@@ -613,11 +634,34 @@
             document.getElementById(`del${index}`).classList.add('hidden');
         }
 
+        /**
+         * 将生成的图片列表渲染到主结果区网格中。
+         * @param {string[]} images - 图片 URL 数组
+         * @param {Function} [onClick] - 单张图片点击回调，接收索引
+         */
+        function renderOutputGrid(images, onClick){
+            const grid = document.getElementById('outputGrid');
+            grid.innerHTML = '';
+            const multi = Array.isArray(images) && images.length > 1;
+            grid.classList.toggle('single', !multi);
+            grid.classList.toggle('multi', !!multi);
+            (images || []).forEach((url, idx) => {
+                const img = document.createElement('img');
+                img.src = url; img.alt = `output-${idx+1}`;
+                img.onclick = () => onClick ? onClick(idx) : zoomImage(idx);
+                grid.appendChild(img);
+            });
+            grid.classList.remove('hidden');
+        }
+
         async function submitImage(){
             const prompt = document.getElementById('promptInput').value.trim();
             if(!prompt){ alert(tr('online.promptRequired')); return; }
-            const btn = document.getElementById('genBtn'), loader = document.getElementById('loader'), placeholder = document.getElementById('placeholder'), out = document.getElementById('outputImg'), dl = document.getElementById('downloadBtn');
-            btn.disabled = true; placeholder.classList.add('hidden'); out.classList.add('hidden'); dl.classList.add('hidden'); loader.classList.remove('hidden');
+            const btn = document.getElementById('genBtn'), loader = document.getElementById('loader'),
+                  placeholder = document.getElementById('placeholder'), grid = document.getElementById('outputGrid'),
+                  dl = document.getElementById('downloadBtn');
+            btn.disabled = true; placeholder.classList.add('hidden'); grid.classList.add('hidden');
+            dl.classList.add('hidden'); loader.classList.remove('hidden');
             try {
                 const reqBody = { prompt, provider_id:provider, model:selectedModel, size:currentSize(), n:outputCount, reference_images:Object.values(refs).filter(Boolean) };
                 if(QUALITY_PROTOCOLS.has(providerProtocol(provider))) reqBody.quality = quality;
@@ -625,7 +669,11 @@
                     method:'POST', headers:{'Content-Type':'application/json'},
                     body:JSON.stringify(reqBody)
                 }).then(async r => { if(!r.ok) throw new Error((await r.json()).detail || '生成失败'); return r.json(); });
-                currentResult = result; out.src = result.images[0]; out.classList.remove('hidden'); dl.href = result.images[0]; dl.classList.remove('hidden'); renderImageCard(result, true);
+                currentResult = result;
+                renderOutputGrid(result.images || [], idx => openLightbox(result, idx));
+                dl.href = (result.images || [])[0] || '#';
+                dl.classList.remove('hidden');
+                renderImageCard(result, true);
             } catch(err) {
                 alert(err.message || 'Generation failed'); placeholder.classList.remove('hidden');
             } finally {
@@ -633,16 +681,32 @@
             }
         }
 
+        /**
+         * 渲染历史记录卡片：多图时以缩略图网格展示，单图保持原样。
+         * @param {Object} data - 历史记录数据，含 images 数组
+         * @param {boolean} [isNew=false] - 是否插入到最前
+         */
         function renderImageCard(data, isNew=false){
-            if(!data.images?.[0] || document.getElementById(`history-${data.timestamp}`)) return;
+            const images = Array.isArray(data.images) ? data.images.filter(Boolean) : [];
+            if(!images.length || document.getElementById(`history-${data.timestamp}`)) return;
             const card = document.createElement('div');
             card.id = `history-${data.timestamp}`;
             card.dataset.historyTs = data.timestamp;
             card.className = 'masonry-item group relative cursor-zoom-in';
-            card.onclick = () => { if(document.body.classList.contains('history-bulk-selecting')) return; openLightbox(data); };
-            const multi = Array.isArray(data.images) && data.images.length > 1
-                ? `<div class="absolute top-3 right-3 bg-black/60 text-white text-[10px] font-black px-2 py-0.5 rounded-full pointer-events-none">×${data.images.length}</div>` : '';
-            card.innerHTML = `<img src="${data.images[0]}" class="w-full h-full object-cover block group-hover:scale-105 transition-transform duration-1000" loading="lazy">${multi}
+            card.onclick = () => { if(document.body.classList.contains('history-bulk-selecting')) return; openLightbox(data, 0); };
+            const count = images.length;
+            let thumbsHtml;
+            if(count === 1){
+                thumbsHtml = `<img src="${images[0]}" class="w-full h-full object-cover block group-hover:scale-105 transition-transform duration-1000" loading="lazy">`;
+            } else {
+                const cntCls = `count-${Math.min(count, 4)}`;
+                thumbsHtml = `<div class="history-thumbs ${cntCls}">` +
+                    images.slice(0, 4).map(u => `<img src="${u}" loading="lazy">`).join('') +
+                    `</div>`;
+            }
+            const multi = count > 1
+                ? `<div class="absolute top-3 right-3 bg-black/60 text-white text-[10px] font-black px-2 py-0.5 rounded-full pointer-events-none">×${count}</div>` : '';
+            card.innerHTML = `${thumbsHtml}${multi}
                 <div class="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 p-6 flex flex-col justify-end"><p class="text-white text-[10px] font-medium line-clamp-2 uppercase tracking-wider">${data.prompt || tr('online.onlineImageFallback')}</p></div>`;
             isNew ? document.getElementById('masonry').prepend(card) : document.getElementById('masonry').appendChild(card);
             lucide.createIcons();
@@ -656,26 +720,59 @@
             loader.classList.toggle('hidden', currentIndex >= allHistory.length);
             loader.innerText = tr('online.loadMore'); isLoading = false;
         }
-        let lightboxPreview = null;
+        let lightboxPreview = null, lightboxIndex = 0;
         function ensureLightboxPreview(){
             if(!lightboxPreview && window.StudioImagePreview){
                 lightboxPreview = StudioImagePreview.attach(document.getElementById('lightboxFrame'));
             }
             return lightboxPreview;
         }
-        function openLightbox(data){
+        /**
+         * 打开 Lightbox 查看大图，支持指定起始索引并翻页。
+         * @param {Object} data - 图片数据，含 images 数组
+         * @param {number} [startIndex=0] - 起始图片索引
+         */
+        function openLightbox(data, startIndex=0){
             currentLightboxData = data;
+            const images = Array.isArray(data?.images) ? data.images.filter(Boolean) : [];
+            lightboxIndex = Math.max(0, Math.min(startIndex|0, images.length - 1));
             const img = document.getElementById('lightboxImg');
             const res = document.getElementById('lightboxRes');
+            const pageInd = document.getElementById('lightboxPageIndicator');
+            const prevBtn = document.getElementById('lightboxPrev');
+            const nextBtn = document.getElementById('lightboxNext');
             res.textContent = '...';
             ensureLightboxPreview();
             if(lightboxPreview) lightboxPreview.reset();
             img.onload = () => { res.textContent = img.naturalWidth && img.naturalHeight ? `${img.naturalWidth} x ${img.naturalHeight}` : (data.params?.size || '--'); };
-            img.src = data.images[0];
+            img.src = images[lightboxIndex] || '';
             document.getElementById('lightboxPrompt').textContent = data.prompt || '';
+            // 翻页控件
+            const multi = images.length > 1;
+            pageInd.classList.toggle('hidden', !multi);
+            prevBtn.classList.toggle('hidden', !multi);
+            nextBtn.classList.toggle('hidden', !multi);
+            if(multi) pageInd.textContent = `${lightboxIndex + 1} / ${images.length}`;
             document.getElementById('lightbox').classList.replace('hidden','flex');
             document.body.style.overflow='hidden';
             lucide.createIcons();
+        }
+        /**
+         * Lightbox 内部翻页：delta 为 +1 / -1。
+         */
+        function lightboxNavigate(delta, ev){
+            if(ev) ev.stopPropagation();
+            const data = currentLightboxData;
+            const images = Array.isArray(data?.images) ? data.images.filter(Boolean) : [];
+            if(!images.length) return;
+            lightboxIndex = (lightboxIndex + delta + images.length) % images.length;
+            const img = document.getElementById('lightboxImg');
+            const res = document.getElementById('lightboxRes');
+            res.textContent = '...';
+            if(lightboxPreview) lightboxPreview.reset();
+            img.onload = () => { res.textContent = img.naturalWidth && img.naturalHeight ? `${img.naturalWidth} x ${img.naturalHeight}` : (data.params?.size || '--'); };
+            img.src = images[lightboxIndex];
+            document.getElementById('lightboxPageIndicator').textContent = `${lightboxIndex + 1} / ${images.length}`;
         }
         function closeLightbox(){
             if(lightboxPreview) lightboxPreview.reset();
@@ -683,24 +780,33 @@
             document.body.style.overflow='auto';
         }
         function handleOutsideClick(e){ if(e.target.id === 'lightbox') closeLightbox(); }
+        /**
+         * 下载 Lightbox 中当前展示的图片。
+         */
         async function downloadLightboxImage(e){
             e.stopPropagation();
-            const url = currentLightboxData?.images?.[0];
+            const images = Array.isArray(currentLightboxData?.images) ? currentLightboxData.images.filter(Boolean) : [];
+            const url = images[lightboxIndex];
             if(!url) return;
             const res = await fetch(url);
             if(!res.ok) return alert('下载失败');
             const blob = await res.blob();
             const clean = url.split('?')[0];
             const ext = clean.includes('.') ? clean.split('.').pop() : 'png';
+            const suffix = images.length > 1 ? `-${lightboxIndex+1}` : '';
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
-            link.download = `online-image-${Date.now()}.${ext || 'png'}`;
+            link.download = `online-image-${Date.now()}${suffix}.${ext || 'png'}`;
             document.body.appendChild(link);
             link.click();
             link.remove();
             setTimeout(() => URL.revokeObjectURL(link.href), 1000);
         }
-        function zoomImage(){ if(currentResult) openLightbox(currentResult); }
+        /**
+         * 点击主结果区图片打开 Lightbox。
+         * @param {number} [idx=0] - 图片索引
+         */
+        function zoomImage(idx=0){ if(currentResult) openLightbox(currentResult, idx); }
         function applySameStyle(){
             if(!currentLightboxData) return;
             document.getElementById('promptInput').value = currentLightboxData.prompt || '';
@@ -735,6 +841,14 @@
             if(res.success) document.getElementById(`history-${ts}`)?.remove();
         }
         const observer = new IntersectionObserver(entries => { if(entries[0].isIntersecting && currentIndex < allHistory.length) loadHistory(1); }, {threshold:.1});
+        // Lightbox 键盘导航：←/→ 翻页，Esc 关闭
+        document.addEventListener('keydown', e => {
+            const lb = document.getElementById('lightbox');
+            if(!lb || lb.classList.contains('hidden')) return;
+            if(e.key === 'Escape') closeLightbox();
+            else if(e.key === 'ArrowLeft') lightboxNavigate(-1);
+            else if(e.key === 'ArrowRight') lightboxNavigate(1);
+        });
         window.onload = async () => { applyLanguage(); setRatio('square'); setResolution('1k'); await initModels(); await loadHistory(0); window.HistoryBulkManager?.attach({masonry:'#masonry'}); observer.observe(document.getElementById('loadMoreTrigger')); document.getElementById('loadMoreTrigger').onclick = () => loadHistory(1); };
     </script>
 </body>
