@@ -13,7 +13,6 @@ import random
 import sys
 import subprocess
 import time
-import traceback
 import shutil
 import asyncio
 import logging
@@ -65,6 +64,15 @@ class QuietAccessLogFilter(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(QuietAccessLogFilter())
 
+# --- 应用日志配置 ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger("infinite-canvas")
+
 app = FastAPI()
 
 app.add_middleware(
@@ -87,7 +95,7 @@ class ConnectionManager:
         self.connection_clients[websocket] = client_id or f"anon-{id(websocket)}"
         if client_id:
             self.user_connections[client_id] = websocket
-        print(f"WS Connected. Total: {len(self.active_connections)}, Online: {self.online_count()}")
+        logger.info(f"WS Connected. Total: {len(self.active_connections)}, Online: {self.online_count()}")
         await self.broadcast_count()
 
     async def disconnect(self, websocket: WebSocket, client_id: str = None):
@@ -96,7 +104,7 @@ class ConnectionManager:
         self.connection_clients.pop(websocket, None)
         if client_id and self.user_connections.get(client_id) is websocket:
             del self.user_connections[client_id]
-        print(f"WS Disconnected. Total: {len(self.active_connections)}, Online: {self.online_count()}")
+        logger.info(f"WS Disconnected. Total: {len(self.active_connections)}, Online: {self.online_count()}")
         await self.broadcast_count()
 
     def online_count(self):
@@ -113,7 +121,7 @@ class ConnectionManager:
             try:
                 await connection.send_text(data)
             except Exception as e:
-                print(f"Broadcast error: {e}")
+                logger.error(f"Broadcast error: {e}")
                 self.active_connections.remove(connection)
 
     async def broadcast_new_image(self, image_data: dict):
@@ -122,7 +130,7 @@ class ConnectionManager:
             try:
                 await connection.send_text(data)
             except Exception as e:
-                print(f"Broadcast image error: {e}")
+                logger.error(f"Broadcast image error: {e}")
                 self.active_connections.remove(connection)
 
     async def broadcast_canvas_updated(self, canvas_id: str, updated_at: int, client_id: str = ""):
@@ -136,7 +144,7 @@ class ConnectionManager:
             try:
                 await connection.send_text(data)
             except Exception as e:
-                print(f"Broadcast canvas error: {e}")
+                logger.error(f"Broadcast canvas error: {e}")
                 self.active_connections.remove(connection)
 
     async def broadcast_asset_library_updated(self, updated_at: int = 0):
@@ -148,7 +156,7 @@ class ConnectionManager:
             try:
                 await connection.send_text(data)
             except Exception as e:
-                print(f"Broadcast asset library error: {e}")
+                logger.error(f"Broadcast asset library error: {e}")
                 self.active_connections.remove(connection)
 
     async def send_personal_message(self, message: dict, client_id: str):
@@ -157,7 +165,7 @@ class ConnectionManager:
             try:
                 await ws.send_text(json.dumps(message))
             except Exception as e:
-                print(f"Personal message error for {client_id}: {e}")
+                logger.error(f"Personal message error for {client_id}: {e}")
 
 manager = ConnectionManager()
 GLOBAL_LOOP = None
@@ -185,17 +193,17 @@ async def startup_event():
     try:
         await asyncio.to_thread(migrate_asset_library_into_dirs)
     except Exception as exc:
-        print(f"资产库分组整理失败: {exc}")
+        logger.error(f"资产库分组整理失败: {exc}")
     # 修复历史遗留的双重扩展名素材（foo.png.png → foo.png），否则这些卡片无法显示
     try:
         await asyncio.to_thread(migrate_double_extension_uploads)
     except Exception as exc:
-        print(f"修复双重扩展名素材失败: {exc}")
+        logger.error(f"修复双重扩展名素材失败: {exc}")
     # 纠正内容与扩展名不符的图片（如 WebP 内容却叫 .png），否则严格客户端解不出来
     try:
         await asyncio.to_thread(migrate_mislabeled_image_extensions)
     except Exception as exc:
-        print(f"纠正图片扩展名失败: {exc}")
+        logger.error(f"纠正图片扩展名失败: {exc}")
 
 @app.websocket("/ws/stats")
 async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
@@ -208,7 +216,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str = None):
     except WebSocketDisconnect:
         await manager.disconnect(websocket, client_id)
     except Exception as e:
-        print(f"WS Error: {e}")
+        logger.error(f"WS Error: {e}")
         await manager.disconnect(websocket, client_id)
 
 # --- 配置区域 ---
@@ -229,7 +237,7 @@ OUTPUT_OUTPUT_DIR = os.path.join(ASSETS_DIR, "output")
 ASSET_LIBRARY_DIR = os.path.join(ASSETS_DIR, "library")
 LOCAL_UPLOAD_DIR = os.path.join(ASSETS_DIR, "uploads")
 HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
-API_ENV_FILE = os.path.join(BASE_DIR, "API", ".env")
+ENV_FILE = os.path.join(BASE_DIR, ".env")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 CONVERSATION_DIR = os.path.join(DATA_DIR, "conversations")
 CANVAS_DIR = os.path.join(DATA_DIR, "canvases")
@@ -434,29 +442,36 @@ RUNNINGHUB_DEFAULT_WORKFLOWS = [
 def ensure_runtime_config_files():
     """首次运行时提前创建配置目录，避免第一次保存 API Key 时才创建目录/文件。"""
     try:
-        os.makedirs(os.path.dirname(API_ENV_FILE), exist_ok=True)
+        os.makedirs(os.path.dirname(ENV_FILE), exist_ok=True)
         os.makedirs(DATA_DIR, exist_ok=True)
-        if not os.path.exists(API_ENV_FILE):
-            with open(API_ENV_FILE, "a", encoding="utf-8"):
+        if not os.path.exists(ENV_FILE):
+            with open(ENV_FILE, "a", encoding="utf-8"):
                 pass
     except Exception as e:
-        print(f"初始化 API 配置目录失败: {e}")
+        logger.error(f"初始化 API 配置目录失败: {e}")
 
 def load_env_file():
-    if not os.path.exists(API_ENV_FILE):
+    """从 .env 文件加载环境变量，支持 KEY=VALUE 和 export KEY=VALUE 两种格式。"""
+    if not os.path.exists(ENV_FILE):
         return
     try:
-        with open(API_ENV_FILE, 'r', encoding='utf-8-sig') as f:
+        with open(ENV_FILE, 'r', encoding='utf-8-sig') as f:
             for raw_line in f.read().splitlines():
                 line = raw_line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
+                # 支持 shell 中常见的 export KEY=VALUE 格式
+                if line.startswith("export "):
+                    line = line[len("export "):].strip()
                 key, value = line.split("=", 1)
                 key = key.strip()
-                value = value.strip().strip('"').strip("'")
+                value = value.strip()
+                # 去除首尾配对的引号（单引号或双引号）
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                    value = value[1:-1]
                 os.environ.setdefault(key, value)
     except Exception as e:
-        print(f"加载 API/.env 失败: {e}")
+        logger.error(f"加载 .env 失败: {e}")
 ensure_runtime_config_files()
 load_env_file()
 
@@ -645,10 +660,10 @@ def volcengine_secret_key_env():
 
 def read_api_env_value(key: str) -> str:
     key = str(key or "").strip()
-    if not key or not os.path.exists(API_ENV_FILE):
+    if not key or not os.path.exists(ENV_FILE):
         return ""
     try:
-        with open(API_ENV_FILE, "r", encoding="utf-8-sig") as f:
+        with open(ENV_FILE, "r", encoding="utf-8-sig") as f:
             for raw_line in f.read().splitlines():
                 line = raw_line.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -1090,7 +1105,7 @@ def load_static_runninghub_provider():
                 provider["rh_workflows"] = apply_runninghub_system_thumbnails(provider.get("rh_workflows") or [], "workflow")
                 return provider
     except Exception as e:
-        print(f"加载 static RunningHub 配置失败: {e}")
+        logger.error(f"加载 static RunningHub 配置失败: {e}")
     return None
 
 def merge_runninghub_provider_with_static(provider):
@@ -1238,7 +1253,7 @@ def load_api_providers():
         providers = [normalize_provider(item) for item in raw if isinstance(item, dict)]
         return merge_default_api_providers(providers or defaults)
     except Exception as e:
-        print(f"加载 API 平台配置失败: {e}")
+        logger.error(f"加载 API 平台配置失败: {e}")
         return defaults
 
 def save_api_providers(providers):
@@ -1346,10 +1361,10 @@ def env_quote(value):
     return text
 
 def update_env_values(updates):
-    os.makedirs(os.path.dirname(API_ENV_FILE), exist_ok=True)
+    os.makedirs(os.path.dirname(ENV_FILE), exist_ok=True)
     lines = []
-    if os.path.exists(API_ENV_FILE):
-        with open(API_ENV_FILE, "r", encoding="utf-8-sig") as f:
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE, "r", encoding="utf-8-sig") as f:
             lines = f.read().splitlines()
     seen = set()
     next_lines = []
@@ -1369,7 +1384,7 @@ def update_env_values(updates):
         if key not in seen:
             next_lines.append(f"{key}={env_quote(value)}")
             os.environ[key] = str(value or "")
-    with open(API_ENV_FILE, "w", encoding="utf-8") as f:
+    with open(ENV_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(next_lines).rstrip() + "\n")
 
 BACKEND_LOCAL_LOAD = {addr: 0 for addr in COMFYUI_INSTANCES}
@@ -1551,9 +1566,9 @@ def sync_static_html_versions():
                     with open(path, "w", encoding="utf-8", newline="") as f:
                         f.write(new)
             except Exception as e:
-                print(f"同步静态页面版本号失败({name}): {e}")
+                logger.error(f"同步静态页面版本号失败({name}): {e}")
     except Exception as e:
-        print(f"同步静态页面版本号失败: {e}")
+        logger.error(f"同步静态页面版本号失败: {e}")
 
 def static_html_response(filename: str):
     path = os.path.join(STATIC_DIR, filename)
@@ -2158,23 +2173,22 @@ def update_from_github(req: UpdateRequest = UpdateRequest()):
             if os.path.isdir(attempt_staging):
                 shutil.rmtree(attempt_staging, ignore_errors=True)
             label = UPDATE_SOURCE_LABELS.get(candidate, candidate)
-            print(f"[update] 尝试下载源 [{idx + 1}/{len(source_order)}] {label}（{candidate}）→ {attempt_staging}")
+            logger.info(f"[update] 尝试下载源 [{idx + 1}/{len(source_order)}] {label}（{candidate}）→ {attempt_staging}")
             try:
                 root_files, static_files, files = stage_update_from_source(candidate, attempt_staging)
                 source = candidate
                 staging_root = attempt_staging
                 fallback_used = idx > 0
-                print(f"[update] 下载源 {label} 成功，共 {len(files or [])} 个文件")
+                logger.info(f"[update] 下载源 {label} 成功，共 {len(files or [])} 个文件")
                 break
             except Exception as exc:  # noqa: BLE001 — 记录后尝试下一个源
                 if os.path.isdir(attempt_staging):
                     shutil.rmtree(attempt_staging, ignore_errors=True)
-                print(f"[update] 下载源 {label} 失败：{exc}")
-                traceback.print_exc()
+                logger.error(f"[update] 下载源 {label} 失败：{exc}", exc_info=True)
                 download_errors.append(f"{label}：{exc}")
         if not staging_root:
             detail = "；".join(download_errors) or "未知错误"
-            print(f"[update] 所有下载源均失败 → {detail}")
+            logger.error(f"[update] 所有下载源均失败 → {detail}")
             raise HTTPException(status_code=502, detail=f"所有下载源均失败 → {detail}")
 
         updated = []
@@ -2821,7 +2835,7 @@ def get_best_backend(required_images: List[str] = None):
                 has_images = check_images_exist(addr, required_images)
                 backend_stats[addr] = {"load": effective_load, "has_images": has_images}
         except Exception as e:
-            print(f"Backend {addr} unreachable: {e}")
+            logger.error(f"Backend {addr} unreachable: {e}")
             continue
 
     if not backend_stats:
@@ -2845,7 +2859,7 @@ def reserve_best_backend(required_images: List[str] = None):
                 has_images = check_images_exist(addr, required_images)
                 backend_stats[addr] = {"remote_load": remote_load, "has_images": has_images}
         except Exception as e:
-            print(f"Backend {addr} unreachable: {e}")
+            logger.error(f"Backend {addr} unreachable: {e}")
             continue
     with LOAD_LOCK:
         best_backend = COMFYUI_INSTANCES[0]
@@ -2870,7 +2884,7 @@ def download_image(comfy_address, comfy_url_path, prefix="studio_"):
             shutil.copyfileobj(response, out_file)
         return output_url_for(filename, "output")
     except Exception as e:
-        print(f"下载图片失败: {e}")
+        logger.error(f"下载图片失败: {e}")
         if comfy_url_path.startswith("/view"):
             return comfy_url_path.replace("/view", "/api/view", 1)
         return full_url
@@ -2937,7 +2951,7 @@ def download_comfy_output(comfy_address, item, prefix="studio_"):
             shutil.copyfileobj(response, out_file)
         return output_url_for(filename, "output")
     except Exception as e:
-        print(f"下载 ComfyUI 输出失败: {e}")
+        logger.error(f"下载 ComfyUI 输出失败: {e}")
         if comfy_url_path.startswith("/view"):
             return comfy_url_path.replace("/view", "/api/view", 1)
         return full_url
@@ -3486,10 +3500,10 @@ def log_net_error(context, exc, url=""):
             proxies = urllib.request.getproxies() or "无"
         except Exception:
             proxies = "?"
-        print(f"[NET-ERR] {context} | url={url or '?'} | sys_proxy={proxies} | " + " <- ".join(chain), flush=True)
+        logger.error(f"[NET-ERR] {context} | url={url or '?'} | sys_proxy={proxies} | " + " <- ".join(chain))
     except Exception:
         try:
-            print(f"[NET-ERR] {context} | {type(exc).__name__}: {exc}", flush=True)
+            logger.error(f"[NET-ERR] {context} | {type(exc).__name__}: {exc}")
         except Exception:
             pass
 
@@ -3504,7 +3518,7 @@ def api_headers(json_body=True, provider=None, model=""):
     else:
         api_key = AI_API_KEY
         if not api_key:
-            raise HTTPException(status_code=400, detail="未配置 COMFLY_API_KEY，请在 API/.env 中填写。")
+            raise HTTPException(status_code=400, detail="未配置 COMFLY_API_KEY，请在 .env 中填写。")
     if provider and effective_protocol(provider, model) == "gemini":
         headers = {"Accept": "application/json", "x-goog-api-key": api_key}
     else:
@@ -4233,7 +4247,7 @@ def jimeng_wsl_base_args(exe="wsl.exe"):
     if configured and (not names or configured in names):
         return ["-d", configured]
     if configured and names:
-        print(f"JIMENG_WSL_DISTRO={configured} 不存在，已回退自动选择。可用发行版：{names}")
+        logger.warning(f"JIMENG_WSL_DISTRO={configured} 不存在，已回退自动选择。可用发行版：{names}")
     try:
         ubuntu = next((name for name in names if re.match(r"^Ubuntu($|-)", name)), "")
         if ubuntu:
@@ -5405,7 +5419,7 @@ def remove_asset_library_file(item) -> None:
         if path and os.path.isfile(path):
             os.remove(path)
     except Exception as exc:
-        print(f"删除资产文件失败: {exc}")
+        logger.error(f"删除资产文件失败: {exc}")
 
 def make_asset_library_item(src: str, name: str = "", subdir: str = "") -> Tuple[str, Dict[str, Any]]:
     kind = asset_library_media_kind(src)
@@ -5592,7 +5606,7 @@ async def classify_asset_image_best_effort(abs_path, provider_id="", model="", m
     try:
         return await classify_image_with_provider(abs_path, provider_id, model, ms_model, prompt)
     except Exception as exc:
-        print(f"素材智能分类失败: {exc}")
+        logger.error(f"素材智能分类失败: {exc}")
         return None
 
 def migrate_asset_library_into_dirs():
@@ -5601,7 +5615,7 @@ def migrate_asset_library_into_dirs():
     try:
         lib = load_asset_library()
     except Exception as exc:
-        print(f"资产库分组整理：加载失败 {exc}")
+        logger.error(f"资产库分组整理：加载失败 {exc}")
         return
     changed = False
     for library in lib.get("libraries", []) or []:
@@ -5617,7 +5631,7 @@ def migrate_asset_library_into_dirs():
             try:
                 os.makedirs(os.path.join(ASSET_LIBRARY_DIR, cat_dir), exist_ok=True)
             except Exception as exc:
-                print(f"资产库分组整理：建文件夹失败 {exc}")
+                logger.error(f"资产库分组整理：建文件夹失败 {exc}")
                 continue
             for item in (cat.get("items") or []):
                 raw_url = urllib.parse.unquote(str(item.get("url") or "").split("?", 1)[0])
@@ -5635,12 +5649,12 @@ def migrate_asset_library_into_dirs():
                     item["url"] = "/assets/library/" + urllib.parse.quote(f"{cat_dir}/{fname}", safe="/")
                     changed = True
                 except Exception as exc:
-                    print(f"资产库分组整理：搬运 {fname} 失败 {exc}")
+                    logger.error(f"资产库分组整理：搬运 {fname} 失败 {exc}")
     if changed:
         try:
             save_asset_library(lib)
         except Exception as exc:
-            print(f"资产库分组整理：保存失败 {exc}")
+            logger.error(f"资产库分组整理：保存失败 {exc}")
 
 def asset_library_workflow_category(lib, library_id="", category_id=""):
     library = find_asset_library(lib, library_id)
@@ -5816,7 +5830,7 @@ def image_path_to_data_url(path, max_size=1024):
                 mime = "image/png" if fmt == "PNG" else "image/jpeg"
                 return f"data:{mime};base64,{encoded}"
         except Exception as e:
-            print(f"shared caption image resize failed: {e}")
+            logger.error(f"shared caption image resize failed: {e}")
     with open(path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("ascii")
     return f"data:{content_type_for_path(path)};base64,{encoded}"
@@ -5878,7 +5892,7 @@ def builtin_prompt_templates():
         with open(template_path, "r", encoding="utf-8") as f:
             return parse_prompt_template_markdown(f.read())
     except Exception as e:
-        print(f"读取提示词模板失败: {e}")
+        logger.error(f"读取提示词模板失败: {e}")
         return []
 
 def normalize_prompt_category_id(category="custom"):
@@ -6147,7 +6161,7 @@ def convert_output_to_jpg(url, quality=88):
         prefix = "/assets" if root == ASSETS_DIR else "/output"
         return f"{prefix}/{rel}"
     except Exception as e:
-        print(f"转换 JPG 失败: {e}")
+        logger.error(f"转换 JPG 失败: {e}")
         return url
 
 def reference_to_data_url(ref, max_size=None):
@@ -6171,7 +6185,7 @@ def reference_to_data_url(ref, max_size=None):
                 mime = "image/png" if fmt == "PNG" else "image/jpeg"
                 return f"data:{mime};base64,{encoded}"
         except Exception as e:
-            print(f"reference resize failed, fallback to raw: {e}")
+            logger.warning(f"reference resize failed, fallback to raw: {e}")
     with open(path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("ascii")
     return f"data:{content_type_for_path(path)};base64,{encoded}"
@@ -6351,9 +6365,9 @@ def xlsx_embedded_image_data_urls(path, max_images=4, max_size=1536):
                         encoded = base64.b64encode(buf.getvalue()).decode("ascii")
                         urls.append(f"data:image/jpeg;base64,{encoded}")
                 except Exception as exc:
-                    print(f"[chat] failed to extract xlsx image {name}: {exc}")
+                    logger.warning(f"[chat] failed to extract xlsx image {name}: {exc}")
     except Exception as exc:
-        print(f"[chat] failed to read xlsx images {path}: {exc}")
+        logger.warning(f"[chat] failed to read xlsx images {path}: {exc}")
     return urls
 
 def attachment_embedded_image_data_urls(refs, max_images=4):
@@ -6399,7 +6413,7 @@ def read_text_attachment(path, limit=MAX_ATTACHMENT_TEXT_CHARS):
                     continue
             return data.decode("utf-8", errors="replace").strip()[:limit]
     except Exception as exc:
-        print(f"[chat] failed to read attachment text {path}: {exc}")
+        logger.warning(f"[chat] failed to read attachment text {path}: {exc}")
     return ""
 
 def attachment_text_blocks(refs, limit_each=MAX_ATTACHMENT_TEXT_CHARS):
@@ -6548,7 +6562,7 @@ async def video_reference_to_frame_data_urls(value, max_frames=6, max_size=768):
                     f.write(response.content)
             path = cleanup_path
         except Exception as e:
-            print(f"[canvas-llm] video download failed: {e}")
+            logger.error(f"[canvas-llm] video download failed: {e}")
             if cleanup_path and os.path.exists(cleanup_path):
                 try: os.remove(cleanup_path)
                 except OSError: pass
@@ -6570,7 +6584,7 @@ async def video_reference_to_frame_data_urls(value, max_frames=6, max_size=768):
         ]
         proc = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=90)
         if proc.returncode != 0:
-            print(f"[canvas-llm] ffmpeg frame extract failed: {proc.stderr[:300]}")
+            logger.error(f"[canvas-llm] ffmpeg frame extract failed: {proc.stderr[:300]}")
             return []
         frames = []
         for name in sorted(os.listdir(frame_dir)):
@@ -6612,7 +6626,7 @@ def compress_data_url_image(value, max_size=1536, jpeg_quality=88):
                 img.save(buf, format=fmt, optimize=True)
             return f"data:{mime};base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
     except Exception as e:
-        print(f"data url image compress failed, fallback to raw: {e}")
+        logger.warning(f"data url image compress failed, fallback to raw: {e}")
         return value
 
 def modelscope_image_url(value, max_size=1536):
@@ -6697,7 +6711,7 @@ def apimart_video_reference_error(value: str) -> str:
             return "这是本地画布文件路径，但后端没有找到对应文件，请重新上传视频后再试。"
         return (
             "这是本地画布文件，APIMart 无法访问 127.0.0.1/局域网路径；"
-            "请在 API/.env 配置 PUBLIC_MEDIA_BASE_URL 或 PUBLIC_BASE_URL 为可公网访问的媒体地址（例如内网穿透 HTTPS 地址），"
+            "请在 .env 配置 PUBLIC_MEDIA_BASE_URL 或 PUBLIC_BASE_URL 为可公网访问的媒体地址（例如内网穿透 HTTPS 地址），"
             "或改用公网 http/https 视频 URL、审核后的 asset:// 地址。"
         )
     if text.startswith("data:") or text.startswith("blob:") or text.startswith("file:"):
@@ -6859,7 +6873,7 @@ async def apimart_upload_post(client, upload_url, headers, file_tuple, timeout=6
             if not is_transient_tls_error(e) or attempt == APIMART_UPLOAD_RETRY_ATTEMPTS - 1:
                 raise
             last_exc = e
-            print(f"APIMart 上传遇到瞬时 TLS 错误，换新连接重试（第 {attempt + 1} 次）：{e}")
+            logger.warning(f"APIMart 上传遇到瞬时 TLS 错误，换新连接重试（第 {attempt + 1} 次）：{e}")
             await asyncio.sleep(0.6 * (attempt + 1))
     if last_exc:
         raise last_exc
@@ -6892,20 +6906,20 @@ async def upload_image_for_apimart(client, provider, ref_url: str) -> str:
                 url = extract_apimart_asset_url(rj)
                 if valid_apimart_video_image_input(url):
                     return url
-                print(f"APIMart 上传 data URL 返回中未找到可用 asset/url: {str(rj)[:300]}")
+                logger.error(f"APIMart 上传 data URL 返回中未找到可用 asset/url: {str(rj)[:300]}")
                 return "ERR:APIMart 上传响应未包含可用 URL"
-            print(f"APIMart 上传 data URL 失败 ({resp.status_code}): {resp.text[:300]}")
+            logger.error(f"APIMart 上传 data URL 失败 ({resp.status_code}): {resp.text[:300]}")
             return f"ERR:APIMart 上传失败({resp.status_code})"
         except ValueError as e:
             return f"ERR:{e}"
         except Exception as e:
-            print(f"APIMart 上传 data URL 异常: {e}")
+            logger.error(f"APIMart 上传 data URL 异常: {e}")
             return f"ERR:上传异常 {e}"
     # 本地 /output/ 或 /assets/ 路径：先确认文件存在再上传
     if ref_url.startswith("/output/") or ref_url.startswith("/assets/"):
         path = output_file_from_url(ref_url)
         if not path:
-            print(f"APIMart 上传跳过：本地文件不存在 {ref_url}")
+            logger.warning(f"APIMart 上传跳过：本地文件不存在 {ref_url}")
             return "ERR:本地文件不存在或已被删除"
         try:
             filename, content, ct = apimart_upload_file_payload(path)
@@ -6915,14 +6929,14 @@ async def upload_image_for_apimart(client, provider, ref_url: str) -> str:
                 url = extract_apimart_asset_url(rj)
                 if valid_apimart_video_image_input(url):
                     return url
-                print(f"APIMart 文件上传返回中未找到可用 asset/url: {str(rj)[:300]}")
+                logger.error(f"APIMart 文件上传返回中未找到可用 asset/url: {str(rj)[:300]}")
                 return "ERR:APIMart 上传响应未包含可用 URL"
-            print(f"APIMart 文件上传失败 ({resp.status_code}): {resp.text[:300]}")
+            logger.error(f"APIMart 文件上传失败 ({resp.status_code}): {resp.text[:300]}")
             return f"ERR:APIMart 上传失败({resp.status_code})"
         except ValueError as e:
             return f"ERR:{e}"
         except Exception as e:
-            print(f"APIMart 文件上传异常: {e}")
+            logger.error(f"APIMart 文件上传异常: {e}")
             return f"ERR:上传异常 {e}"
     return "ERR:不支持的图片来源（仅支持 http/https/asset/data 或本地 /output/ /assets/ 路径）"
 
@@ -6962,13 +6976,13 @@ async def upload_video_for_apimart(client, provider, ref_url: str) -> str:
                 if valid_apimart_video_image_input(url):
                     return url
                 last_error = "上传响应未包含可用 URL"
-                print(f"APIMart 视频上传返回中未找到可用 asset/url ({upload_path}): {str(rj)[:300]}")
+                logger.error(f"APIMart 视频上传返回中未找到可用 asset/url ({upload_path}): {str(rj)[:300]}")
                 continue
             last_error = f"{upload_path} 返回 {resp.status_code}: {resp.text[:200]}"
-            print(f"APIMart 视频上传失败 {last_error}")
+            logger.error(f"APIMart 视频上传失败 {last_error}")
         except Exception as e:
             last_error = f"{upload_path} 异常：{e}"
-            print(f"APIMart 视频上传异常: {last_error}")
+            logger.error(f"APIMart 视频上传异常: {last_error}")
     return f"ERR:APIMart 未提供可用的视频文件上传入口（{last_error}）。请配置 PUBLIC_BASE_URL，或使用公网 http/https / asset:// 视频地址。"
 
 async def upload_audio_for_apimart(client, provider, ref_url: str) -> str:
@@ -7368,7 +7382,7 @@ async def save_ai_image_to_output(image_data, prefix="online_", category="output
                 f.write(response.content)
             return output_url_for(filename, category)
     except Exception as e:
-        print(f"保存上游图片失败: {e}")
+        logger.error(f"保存上游图片失败: {e}")
         return value
 
 def image_output_meta(url, source_item=None):
@@ -7449,7 +7463,7 @@ async def save_remote_video_to_output(url, prefix="video_", category="output"):
                 raise RuntimeError("empty video response")
             return output_url_for(filename, category)
     except Exception as e:
-        print(f"保存上游视频失败: {e}")
+        logger.error(f"保存上游视频失败: {e}")
         try:
             if os.path.exists(path):
                 os.remove(path)
@@ -9057,7 +9071,7 @@ async def generate_ai_image(prompt, size, quality, model, reference_images=None,
                         status_code=502,
                         detail=f"GPT-Image-2 编辑接口 /images/edits 调用失败：{edit_failed_text[:300] or edit_failed_status}。已停止自动重试，避免上游可能已扣费后再次请求。"
                     )
-                print(f"/images/edits failed ({edit_failed_status}): {edit_failed_text[:200]} → 回退到 /images/generations + image:[] JSON")
+                logger.warning(f"/images/edits failed ({edit_failed_status}): {edit_failed_text[:200]} → 回退到 /images/generations + image:[] JSON")
                 image_payload = [reference_to_data_url(ref, max_size=1536) for ref in image_refs[:ONLINE_IMAGE_REFERENCE_MAX]]
                 body = {
                     "model": model, "prompt": prompt, "size": size,
@@ -9153,7 +9167,7 @@ def image_size_from_reference(ref):
         if width > 0 and height > 0:
             return f"{width}x{height}"
     except Exception as exc:
-        print(f"[chat-agent] failed to read reference image size: {exc}")
+        logger.error(f"[chat-agent] failed to read reference image size: {exc}")
     return ""
 
 def chat_requested_image_count(message):
@@ -9285,7 +9299,7 @@ async def decide_chat_agent_action(payload, conversation, refs):
             decision["router_model"] = model
             return decision
     except Exception as exc:
-        print(f"[chat-agent] intent router fallback: {exc}")
+        logger.warning(f"[chat-agent] intent router fallback: {exc}")
         fallback["router_model"] = model
         return fallback
 
@@ -9430,7 +9444,7 @@ async def upload_image(files: List[UploadFile] = File(...)):
                     last_result = response.json()
                     success_count += 1
             except Exception as e:
-                print(f"Upload error for {addr}: {e}")
+                logger.error(f"Upload error for {addr}: {e}")
 
         if success_count > 0 and last_result:
             uploaded_files.append({"comfy_name": last_result.get("name", file.filename)})
@@ -9540,7 +9554,7 @@ async def upload_comfyui_base64(payload: Base64UploadRequest):
             if resp.status_code == 200:
                 comfy_name = resp.json().get("name", filename)
         except Exception as exc:
-            print(f"ComfyUI base64 upload error for {addr}: {exc}")
+            logger.error(f"ComfyUI base64 upload error for {addr}: {exc}")
     if not comfy_name:
         raise HTTPException(status_code=502, detail="上传到 ComfyUI 失败")
     return {"name": comfy_name}
@@ -9755,7 +9769,7 @@ def migrate_double_extension_uploads():
                     except OSError:
                         pass
     if renamed:
-        print(f"修复双重扩展名素材: {renamed} 个")
+        logger.info(f"修复双重扩展名素材: {renamed} 个")
 
 def _sniff_image_ext_bytes(head):
     """按文件头魔数判断真实图片格式，返回规范扩展名（含点），无法识别返回 None。"""
@@ -9817,7 +9831,7 @@ def migrate_mislabeled_image_extensions():
                     except OSError:
                         pass
     if fixed:
-        print(f"纠正图片扩展名(内容与后缀不符): {fixed} 个")
+        logger.info(f"纠正图片扩展名(内容与后缀不符): {fixed} 个")
 
 @app.post("/api/local-assets/upload")
 async def upload_local_assets(files: List[UploadFile] = File(...), folder: str = Form("")):
@@ -12669,7 +12683,7 @@ async def canvas_llm(payload: CanvasLLMRequest):
                     continue
                 content_parts.append({"type": "video_url", "video_url": {"url": ref_url}})
                 ok_videos += 1
-        print(f"[canvas-llm] model={model} provider={payload.provider} text_len={len(payload.message)} images={ok_imgs}/{len(payload.images)} videos={ok_videos}/{len(payload.videos)}")
+        logger.info(f"[canvas-llm] model={model} provider={payload.provider} text_len={len(payload.message)} images={ok_imgs}/{len(payload.images)} videos={ok_videos}/{len(payload.videos)}")
         upstream_messages.append({"role": "user", "content": content_parts})
     else:
         upstream_messages.append({"role": "user", "content": payload.message})
@@ -12856,7 +12870,7 @@ async def smart_canvas_prompt_templates():
         source = os.path.relpath(template_path, BASE_DIR).replace("\\", "/") if template_path else ""
         return {"templates": builtin_prompt_templates(), "source": source}
     except Exception as e:
-        print(f"读取提示词模板失败: {e}")
+        logger.error(f"读取提示词模板失败: {e}")
         return {"templates": []}
 
 @app.post("/api/canvas-assets/check")
@@ -13419,7 +13433,7 @@ async def create_asset_library_category(payload: AssetLibraryCategoryRequest):
         try:
             os.makedirs(os.path.join(ASSET_LIBRARY_DIR, category["dir"]), exist_ok=True)
         except Exception as exc:
-            print(f"创建分组文件夹失败: {exc}")
+            logger.error(f"创建分组文件夹失败: {exc}")
     library.setdefault("categories", []).append(category)
     lib["active_library_id"] = library.get("id") or lib.get("active_library_id")
     save_asset_library(lib)
@@ -13453,7 +13467,7 @@ async def delete_asset_library_category(category_id: str, library_id: str = ""):
             if os.path.isdir(target) and os.path.abspath(target).startswith(os.path.abspath(ASSET_LIBRARY_DIR) + os.sep):
                 shutil.rmtree(target, ignore_errors=True)
         except Exception as exc:
-            print(f"删除分组文件夹失败: {exc}")
+            logger.error(f"删除分组文件夹失败: {exc}")
     library["categories"] = [c for c in library.get("categories", []) if c.get("id") != category_id]
     save_asset_library(lib)
     return {"library": lib}
@@ -14319,7 +14333,7 @@ async def get_history_api(type: str = None):
                 data.sort(key=sort_key, reverse=True)
                 return data
         except Exception as e:
-            print(f"读取历史文件失败: {e}")
+            logger.error(f"读取历史文件失败: {e}")
             return []
     return []
 
@@ -14364,12 +14378,12 @@ async def delete_history(req: DeleteHistoryRequest):
                     try:
                         os.remove(file_path)
                     except Exception as e:
-                        print(f"Failed to delete file {file_path}: {e}")
+                        logger.error(f"Failed to delete file {file_path}: {e}")
             return {"success": True}
         else:
             return {"success": False, "message": "Record not found"}
     except Exception as e:
-        print(f"Delete history error: {e}")
+        logger.error(f"Delete history error: {e}")
         return {"success": False, "message": str(e)}
 
 # --- ModelScope 角度控制 ---
@@ -14387,7 +14401,7 @@ async def poll_angle_cloud(req: CloudPollRequest):
         "X-ModelScope-Async-Mode": "true"
     }
     task_id = req.task_id
-    print(f"Resuming polling for Angle Task: {task_id}")
+    logger.info(f"Resuming polling for Angle Task: {task_id}")
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -14442,7 +14456,7 @@ async def poll_angle_cloud(req: CloudPollRequest):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Angle polling error: {e}")
+        logger.error(f"Angle polling error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/angle/generate")
@@ -14479,7 +14493,7 @@ async def generate_angle_cloud(req: CloudGenRequest):
                 raise HTTPException(status_code=submit_res.status_code, detail=detail)
 
             task_id = submit_res.json().get("task_id")
-            print(f"Angle Task submitted, ID: {task_id}")
+            logger.info(f"Angle Task submitted, ID: {task_id}")
 
             for i in range(300):
                 await asyncio.sleep(2)
@@ -14534,7 +14548,7 @@ async def generate_angle_cloud(req: CloudGenRequest):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Angle generation error: {e}")
+        logger.error(f"Angle generation error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 # --- ModelScope Z-Image 云端生图 ---
@@ -14574,7 +14588,7 @@ async def generate_cloud(req: CloudGenRequest):
                 raise HTTPException(status_code=submit_res.status_code, detail=detail)
 
             task_id = submit_res.json().get("task_id")
-            print(f"Z-Image Task submitted, ID: {task_id}")
+            logger.info(f"Z-Image Task submitted, ID: {task_id}")
 
             for i in range(200):
                 await asyncio.sleep(3)
@@ -14587,7 +14601,7 @@ async def generate_cloud(req: CloudGenRequest):
                 status = str(data.get("task_status") or "").upper()
 
                 if i % 5 == 0:
-                    print(f"Task {task_id} status check {i}: {status}")
+                    logger.info(f"Task {task_id} status check {i}: {status}")
 
                 if status == "SUCCEED":
                     img_url = data["output_images"][0]
@@ -14604,7 +14618,7 @@ async def generate_cloud(req: CloudGenRequest):
                             else:
                                 local_path = img_url
                     except Exception as dl_e:
-                        print(f"Download error: {dl_e}")
+                        logger.error(f"Download error: {dl_e}")
                         local_path = img_url
 
                     record = {"timestamp": time.time(), "prompt": req.prompt, "images": [local_path], "type": "cloud"}
@@ -14623,7 +14637,7 @@ async def generate_cloud(req: CloudGenRequest):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Cloud generation error: {e}")
+        logger.error(f"Cloud generation error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 # --- ModelScope 通用图片生成（支持图生图） ---
@@ -14670,7 +14684,7 @@ async def ms_generate(req: MsGenerateRequest):
                 raise HTTPException(status_code=submit_res.status_code, detail=detail)
 
             task_id = submit_res.json().get("task_id")
-            print(f"MS Generate Task submitted ({req.model}), ID: {task_id}")
+            logger.info(f"MS Generate Task submitted ({req.model}), ID: {task_id}")
 
             TERMINAL_FAILED_STATUSES = {"FAILED", "FAIL", "ERROR", "CANCELED", "CANCELLED", "TIMEOUT", "REVOKED"}
 
@@ -14683,7 +14697,7 @@ async def ms_generate(req: MsGenerateRequest):
                     )
                     data = result.json()
                     status = data.get("task_status")
-                    print(f"MS Task {task_id} poll {i}: status={status}")
+                    logger.info(f"MS Task {task_id} poll {i}: status={status}")
 
                     if status == "SUCCEED":
                         img_url = data["output_images"][0]
@@ -14721,7 +14735,7 @@ async def ms_generate(req: MsGenerateRequest):
                 except HTTPException:
                     raise
                 except Exception as loop_e:
-                    print(f"MS polling error: {loop_e}")
+                    logger.error(f"MS polling error: {loop_e}")
                     continue
 
             raise HTTPException(status_code=504, detail="MS 生图超时")
@@ -14729,7 +14743,7 @@ async def ms_generate(req: MsGenerateRequest):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"MS generate error: {e}")
+        logger.error(f"MS generate error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 # --- 本地 ComfyUI 生图 ---
@@ -14780,7 +14794,7 @@ def generate(req: GenerateRequest):
                         files = {'image': (image_name, image_content, image_type)}
                         requests.post(f"http://{target_backend}/upload/image", files=files, timeout=10)
                     except Exception as e:
-                        print(f"Sync upload failed: {e}")
+                        logger.error(f"Sync upload failed: {e}")
 
         workflow_path = os.path.join(WORKFLOW_DIR, req.workflow_json)
         if not os.path.exists(workflow_path) and req.workflow_json == "Z-Image.json":
