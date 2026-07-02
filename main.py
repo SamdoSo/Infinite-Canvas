@@ -189,6 +189,14 @@ async def startup_event():
     global GLOBAL_LOOP
     GLOBAL_LOOP = asyncio.get_running_loop()
     sync_static_html_versions()
+    # 迁移旧版 history.json（项目根目录 → data/），确保 Docker 卷持久化
+    old_history = os.path.join(BASE_DIR, "history.json")
+    if os.path.exists(old_history) and os.path.realpath(old_history) != os.path.realpath(HISTORY_FILE):
+        try:
+            shutil.copy2(old_history, HISTORY_FILE)
+            logger.info(f"已将 history.json 从项目根目录迁移到 {HISTORY_FILE}")
+        except Exception as exc:
+            logger.error(f"迁移 history.json 失败: {exc}")
     # 启动时整理资产库：给所有图片分组（含默认角色/场景）建好文件夹，并把根目录里的旧素材归整进去。
     try:
         await asyncio.to_thread(migrate_asset_library_into_dirs)
@@ -236,9 +244,9 @@ OUTPUT_INPUT_DIR = os.path.join(ASSETS_DIR, "input")
 OUTPUT_OUTPUT_DIR = os.path.join(ASSETS_DIR, "output")
 ASSET_LIBRARY_DIR = os.path.join(ASSETS_DIR, "library")
 LOCAL_UPLOAD_DIR = os.path.join(ASSETS_DIR, "uploads")
-HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
-ENV_FILE = os.path.join(BASE_DIR, ".env")
 DATA_DIR = os.path.join(BASE_DIR, "data")
+HISTORY_FILE = os.path.join(DATA_DIR, "history.json")  # 存在 data/ 下以便 Docker 卷持久化
+ENV_FILE = os.path.join(BASE_DIR, ".env")
 CONVERSATION_DIR = os.path.join(DATA_DIR, "conversations")
 CANVAS_DIR = os.path.join(DATA_DIR, "canvases")
 MEDIA_PREVIEW_DIR = os.path.join(DATA_DIR, "media_previews")
@@ -2527,6 +2535,7 @@ class ApiProviderPayload(BaseModel):
     base_url: str = ""
     protocol: str = "openai"
     image_request_mode: str = "openai"
+    image_edit_route: str = "general"
     image_generation_endpoint: str = ""
     image_edit_endpoint: str = ""
     enabled: bool = True
@@ -4148,7 +4157,7 @@ async def codex_chat_text(payload, history_messages=None):
         if hasattr(payload, "images"):
             image_values.extend([{"url": item} for item in (getattr(payload, "images", None) or []) if item])
         if hasattr(payload, "reference_images"):
-            image_values.extend([ref.dict() for ref in (getattr(payload, "reference_images", None) or []) if getattr(ref, "url", "")])
+            image_values.extend([ref.model_dump() for ref in (getattr(payload, "reference_images", None) or []) if getattr(ref, "url", "")])
         image_paths, temp_paths = await codex_reference_paths(image_values)
         raw = await run_codex_cli(
             codex_chat_prompt(payload, history_messages),
@@ -10738,7 +10747,7 @@ async def save_providers(payload: List[ApiProviderPayload]):
     # 收集每个 item 的 primary 字段
     raw_primary_flags = [bool(getattr(item, "primary", False)) for item in payload]
     for item in payload:
-        provider = normalize_provider(item.dict(exclude={"api_key"}))
+        provider = normalize_provider(item.model_dump(exclude={"api_key"}))
         if provider["id"] == "runninghub":
             provider = preserve_runninghub_hidden_overrides(provider)
         if any(existing["id"] == provider["id"] for existing in providers):
@@ -11426,7 +11435,7 @@ async def build_online_image_result(payload: OnlineImageRequest):
     provider = get_api_provider(payload.provider_id)
     default_model = (provider.get("image_models") or [IMAGE_MODEL])[0]
     model = selected_model(payload.model, default_model)
-    refs = [ref.dict() for ref in payload.reference_images if ref.url]
+    refs = [ref.model_dump() for ref in payload.reference_images if ref.url]
     image_refs = image_references(refs)
     count = max(1, min(8, int(payload.n or 1)))
     async def generate_one():
@@ -12463,7 +12472,7 @@ async def canvas_video(payload: CanvasVideoRequest):
                             yuli_images.append(ref_url)
                         else:
                             # 本地/dataURL 图片转成 data URL 兜底传递
-                            data_url = reference_to_data_url(ref.dict(), max_size=1536)
+                            data_url = reference_to_data_url(ref.model_dump(), max_size=1536)
                             if data_url:
                                 yuli_images.append(data_url)
                     prompt_text = str(payload.prompt or "")
@@ -12486,7 +12495,7 @@ async def canvas_video(payload: CanvasVideoRequest):
                     image_payload = []
                     for ref in payload.images[:4]:
                         if ref.url:
-                            image_payload.append(reference_to_data_url(ref.dict(), max_size=1536))
+                            image_payload.append(reference_to_data_url(ref.model_dump(), max_size=1536))
                     body = {
                         "prompt": payload.prompt,
                         "model": selected_model(payload.model, "veo3-fast"),
@@ -14004,7 +14013,7 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
     if not conversation.get("messages"):
         conversation["title"] = display_title(payload.message)
 
-    refs = [ref.dict() for ref in payload.reference_images if ref.url]
+    refs = [ref.model_dump() for ref in payload.reference_images if ref.url]
     image_refs = image_references(refs)
     user_message = {
         "id": uuid.uuid4().hex,
@@ -14117,7 +14126,7 @@ async def chat_agent(payload: ChatRequest, request: Request, x_user_id: str = He
     if not conversation.get("messages"):
         conversation["title"] = display_title(payload.message)
 
-    refs = [ref.dict() for ref in payload.reference_images if ref.url]
+    refs = [ref.model_dump() for ref in payload.reference_images if ref.url]
     image_refs = image_references(refs)
     user_message = {
         "id": uuid.uuid4().hex,
@@ -14206,7 +14215,7 @@ async def chat_stream(payload: ChatRequest, request: Request, x_user_id: str = H
     if not conversation.get("messages"):
         conversation["title"] = display_title(payload.message)
 
-    refs = [ref.dict() for ref in payload.reference_images if ref.url]
+    refs = [ref.model_dump() for ref in payload.reference_images if ref.url]
     user_message = {
         "id": uuid.uuid4().hex,
         "role": "user",
@@ -15276,8 +15285,8 @@ def runninghub_workflow_store_key(workflow_id: str) -> str:
 
 def runninghub_normalize_field(raw, fallback=None):
     fallback = fallback or {}
-    if hasattr(raw, "dict"):
-        raw = raw.dict()
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump()
     if not isinstance(raw, dict):
         raw = {}
     options = raw.get("options", fallback.get("options", []))
@@ -15503,8 +15512,8 @@ def save_workflow_config(name: str, payload: WorkflowConfig):
         raise HTTPException(status_code=404, detail="Workflow not found")
     cfg_path = workflow_config_path(name)
     with open(cfg_path, "w", encoding="utf-8") as f:
-        json.dump(payload.dict(), f, ensure_ascii=False, indent=2)
-    return {"config": payload.dict()}
+        json.dump(payload.model_dump(), f, ensure_ascii=False, indent=2)
+    return {"config": payload.model_dump()}
 
 @app.delete("/api/workflows/{name:path}")
 def delete_workflow(name: str):

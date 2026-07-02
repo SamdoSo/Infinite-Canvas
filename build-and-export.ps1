@@ -4,17 +4,17 @@
 # 功能：
 #   1. 读取 VERSION 文件作为镜像标签
 #   2. 构建 Docker 镜像
-#   3. 导出为 tar.gz 压缩包
+#   3. 导出为 tar 文件（不压缩）
 #   4. 将部署所需的文件复制到 deploy/ 目录
 #
 # 最终产物（deploy/ 目录）：
-#   - infinite-canvas-<版本号>.tar.gz   Docker 镜像压缩包
+#   - infinite-canvas-<版本号>.tar     Docker 镜像文件
 #   - docker-compose.yml                服务器部署用 compose 文件
 #   - .env.example                      环境变量模板（请自行重命名为 .env 并填写）
 #
 # 服务器部署：
 #   1. 将 deploy/ 下所有文件上传到服务器
-#   2. docker load -i infinite-canvas-<版本号>.tar.gz
+#   2. docker load -i infinite-canvas-<版本号>.tar
 #   3. cp .env.example .env 并填写配置
 #   4. docker compose up -d
 # ============================================================
@@ -40,7 +40,6 @@ $IMAGE_NAME = "infinite-canvas"
 $IMAGE_TAG = "${IMAGE_NAME}:${VERSION}"
 $IMAGE_LATEST = "${IMAGE_NAME}:latest"
 $TAR_FILE = "${IMAGE_NAME}-${VERSION}.tar"
-$TAR_GZ_FILE = "${TAR_FILE}.gz"
 $DEPLOY_DIR = "deploy"
 
 Write-Host "========================================" -ForegroundColor Cyan
@@ -78,11 +77,10 @@ if (Test-Path $DEPLOY_DIR) {
 New-Item -ItemType Directory -Path $DEPLOY_DIR | Out-Null
 Write-Host "  已创建 deploy/ 目录" -ForegroundColor Green
 
-# ---------- 4. 导出镜像并压缩 ----------
+# ---------- 4. 导出镜像 ----------
 Write-Host ""
-Write-Host "[4/5] 导出镜像并压缩为 tar.gz（可能需要几分钟）..." -ForegroundColor Yellow
+Write-Host "[4/5] 导出镜像为 tar 文件（可能需要几分钟）..." -ForegroundColor Yellow
 $tarPath = Join-Path $DEPLOY_DIR $TAR_FILE
-$tarGzPath = Join-Path $DEPLOY_DIR $TAR_GZ_FILE
 
 docker save -o $tarPath $IMAGE_TAG $IMAGE_LATEST
 if ($LASTEXITCODE -ne 0) {
@@ -90,22 +88,8 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# 使用 gzip 压缩（PowerShell 5.1+ 自带 Compress-Archive，但生成的是 zip；
-# 服务器上 tar.gz 更通用，因此用 .NET 的 GZipStream）
-Write-Host "  正在压缩 tar -> tar.gz ..." -ForegroundColor Gray
-$inputStream = [System.IO.File]::OpenRead($tarPath)
-$outputStream = [System.IO.File]::Create($tarGzPath)
-$gzipStream = New-Object System.IO.Compression.GZipStream($outputStream, [System.IO.Compression.CompressionMode]::Compress)
-$inputStream.CopyTo($gzipStream)
-$gzipStream.Close()
-$outputStream.Close()
-$inputStream.Close()
-
-# 删除未压缩的 tar
-Remove-Item $tarPath
-
-$gzSize = [math]::Round((Get-Item $tarGzPath).Length / 1MB, 2)
-Write-Host "  导出完成: ${TAR_GZ_FILE} (${gzSize} MB)" -ForegroundColor Green
+$tarSize = [math]::Round((Get-Item $tarPath).Length / 1MB, 2)
+Write-Host "  导出完成: ${TAR_FILE} (${tarSize} MB)" -ForegroundColor Green
 
 # ---------- 5. 复制部署文件 ----------
 Write-Host ""
@@ -127,7 +111,7 @@ Write-Host "产物位于: $(Join-Path $PSScriptRoot $DEPLOY_DIR)" -ForegroundCol
 Write-Host ""
 Write-Host "服务器部署步骤：" -ForegroundColor Yellow
 Write-Host "  1. 将 deploy/ 目录下所有文件上传到服务器"
-Write-Host "  2. 加载镜像: docker load -i ${TAR_GZ_FILE}"
+Write-Host "  2. 加载镜像: docker load -i ${TAR_FILE}"
 Write-Host "  3. 复制配置: cp .env.example .env  并按需填写"
 Write-Host "  4. 启动服务: docker compose up -d"
 Write-Host "  5. 访问: http://服务器IP:3000"

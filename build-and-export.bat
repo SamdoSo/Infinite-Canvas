@@ -1,18 +1,18 @@
 @echo off
 REM ============================================================
-REM Infinite-Canvas Docker 镜像打包导出脚本（Windows 一键启动）
+REM Infinite-Canvas Docker Image Build & Export Script (Windows)
 REM ============================================================
-REM 功能：调用 build-and-export.ps1 完成镜像打包导出
+REM Usage: Calls build-and-export.ps1 to build and export image
 REM ============================================================
 
-echo 正在启动 Docker 镜像打包导出脚本...
+echo Starting Docker image build and export...
 echo.
 
 powershell -ExecutionPolicy Bypass -File "%~dp0build-and-export.ps1"
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
-    echo 打包失败，请查看上方错误信息。
+    echo Build failed. Please check the error messages above.
     pause
     exit /b 1
 )

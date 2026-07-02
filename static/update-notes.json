@@ -1,26 +1,18 @@
 {
-  "version": "2026.06.29",
-  "updated_at": "2026-06-30T20:36:36+08:00",
+  "version": "2026.07.02",
+  "updated_at": "2026-07-02T20:00:00+08:00",
   "items": [
     {
-      "type": "feature",
-      "text": "新增 OpenAI Codex CLI 平台"
+      "type": "fix",
+      "text": "修复 Pydantic v2 .dict() 弃用警告"
     },
     {
-      "type": "feature",
-      "text": "图片编辑新增缩放原图"
+      "type": "fix",
+      "text": "修复模型选择器底部按钮不显示问题"
     },
     {
-      "type": "feature",
-      "text": "Alt 复制支持保留连线"
-    },
-    {
-      "type": "update",
-      "text": "图片节点标题可显示改名"
-    },
-    {
-      "type": "feature",
-      "text": "生成完成新增提示音"
+      "type": "fix",
+      "text": "修复 .env 文件权限错误（目录问题）"
     }
   ]
 }

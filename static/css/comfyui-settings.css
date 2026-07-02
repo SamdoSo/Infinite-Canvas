@@ -229,7 +229,7 @@ body.studio-theme-dark .pfield-bool-track:not(.on) .pfield-bool-thumb { backgrou
 .mini-image-drop audio { width:100%; padding:0 8px; }
 .mini-settings-list { display:flex; flex-direction:column; gap:8px; max-height:230px; overflow:auto; }
 .mini-result img { width:100%; border-radius:9px; display:block; cursor:zoom-in; }
-.image-lightbox { position:fixed; inset:0; z-index:100; display:none; align-items:center; justify-content:center; padding:36px; background:rgba(15,23,42,.42); backdrop-filter:blur(16px); }
+.image-lightbox { position:fixed; inset:0; z-index:100; display:none; align-items:center; justify-content:center; padding:36px; background:rgba(15,23,42,.42); -webkit-backdrop-filter:blur(16px); backdrop-filter:blur(16px); }
 .image-lightbox.open { display:flex; }
 .image-lightbox img { display:block; max-width:min(1120px, 92vw); max-height:86vh; object-fit:contain; border-radius:18px; background:var(--panel); box-shadow:0 30px 90px rgba(0,0,0,.28); }
 .mini-line { position:absolute; height:2px; background:var(--line-strong); transform-origin:0 50%; pointer-events:none; opacity:.85; }
