@@ -477,11 +477,18 @@ def load_env_file():
                 # 去除首尾配对的引号（单引号或双引号）
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                     value = value[1:-1]
+                # 跳过空值，避免覆盖系统环境变量
+                if not value:
+                    continue
                 os.environ.setdefault(key, value)
     except Exception as e:
         logger.error(f"加载 .env 失败: {e}")
 ensure_runtime_config_files()
 load_env_file()
+# 启动日志：打印关键 API Key 是否已配置（不泄漏完整 key）
+_loaded_comfly = bool(os.getenv("COMFLY_API_KEY"))
+_loaded_ms = bool(os.getenv("MODELSCOPE_API_KEY"))
+logger.info(f"API Key 加载状态: COMFLY_API_KEY={'已配置' if _loaded_comfly else '未配置'}, MODELSCOPE_API_KEY={'已配置' if _loaded_ms else '未配置'}")
 
 COMFYUI_INSTANCES = [s.strip() for s in os.getenv("COMFYUI_INSTANCES", "127.0.0.1:8188").split(",") if s.strip()]
 COMFYUI_ADDRESS = COMFYUI_INSTANCES[0]
