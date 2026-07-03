@@ -5,3 +5,7 @@ pydantic
 python-multipart
 httpx
 pillow
+sqlalchemy
+pyjwt
+cryptography
+passlib[bcrypt]

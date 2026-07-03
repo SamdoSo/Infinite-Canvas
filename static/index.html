@@ -23,11 +23,11 @@
             } catch(e) {}
         })();
     </script>
-    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.06.30.1779934979"></script>
-    <script src="/static/js/theme.js?v=2026.06.30.1780568960"></script>
-    <script src="/static/js/i18n.js?v=2026.06.30.1782965286"></script>
+    <script src="/static/vendor/js/tailwindcss-cdn.js?v=2026.07.02.1779934979"></script>
+    <script src="/static/js/theme.js?v=2026.07.02.1783065330"></script>
+    <script src="/static/js/i18n.js?v=2026.07.02.1783071486"></script>
     <style>
-        @import url('/static/vendor/css/fonts.css?v=2026.06.30.1779934979');
+        @import url('/static/vendor/css/fonts.css?v=2026.07.02.1779934979');
 
         /* 本地 Tailwind 工具类兜底：CDN 慢/未就绪时也能立刻给图标尺寸，避免首屏左侧栏空白 */
         .w-1\.5 { width: 0.375rem; }
@@ -422,6 +422,55 @@
             box-shadow: 0 4px 20px var(--monitor-shadow);
             font-family: monospace;
             transition: all 0.4s var(--fluid-ease);
+        }
+
+        /* 幽灵登录横幅 */
+        .impersonation-banner {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 200;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 8px 20px;
+            background: linear-gradient(90deg, #f59e0b, #d97706);
+            color: #fff;
+            font-size: 12px;
+            font-weight: 700;
+            box-shadow: 0 2px 12px rgba(245, 158, 11, 0.3);
+        }
+
+        .impersonation-banner-content {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .impersonation-exit-btn {
+            padding: 4px 12px;
+            border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            background: rgba(255, 255, 255, 0.15);
+            color: #fff;
+            font-size: 11px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.15s;
+            flex-shrink: 0;
+        }
+
+        .impersonation-exit-btn:hover {
+            background: rgba(255, 255, 255, 0.25);
+            border-color: rgba(255, 255, 255, 0.6);
+        }
+
+        /* 幽灵模式时 stage 内边距调整，避免遮挡 iframe 顶部 */
+        .stage.has-impersonation-banner iframe {
+            top: 36px;
+            height: calc(100% - 36px);
         }
 
         .nano-monitor.is-busy {
@@ -1521,6 +1570,14 @@
                     </svg>
                     <span class="nav-text" data-i18n="nav.assetManager">素材库</span>
                 </div>
+                <!-- 管理员面板入口（仅管理员可见） -->
+                <div class="nav-item admin-nav-item" onclick="switchUI(this, 'admin')" style="display:none">
+                    <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                        <path d="M9 12l2 2 4-4"></path>
+                    </svg>
+                    <span class="nav-text" data-i18n="nav.admin">管理员面板</span>
+                </div>
             </nav>
 
             <div class="side-actions">
@@ -1644,16 +1701,30 @@
         </script>
 
         <main class="stage">
-            <iframe id="frame-zimage" data-src="/static/zimage.html?v=2026.06.30.1782971964" class="active" scrolling="yes"></iframe>
-            <iframe id="frame-enhance" data-src="/static/enhance.html?v=2026.06.30.1782971964" scrolling="yes"></iframe>
-            <iframe id="frame-klein" data-src="/static/klein.html?v=2026.06.30.1782971964" scrolling="yes"></iframe>
-            <iframe id="frame-angle" data-src="/static/angle.html?v=2026.06.30.1782971964" scrolling="yes"></iframe>
-            <iframe id="frame-online" data-src="/static/online.html?v=2026.06.30.1782971964" scrolling="yes"></iframe>
-            <iframe id="frame-gpt-chat" data-src="/static/gpt-chat.html?v=2026.06.30.1782971964" scrolling="yes"></iframe>
-            <iframe id="frame-asset-manager" data-src="/static/asset-manager.html?v=2026.06.30.1782971964" scrolling="yes"></iframe>
-            <iframe id="frame-api-settings" data-src="/static/api-settings.html?v=2026.06.30.1782976020" scrolling="yes"></iframe>
-            <iframe id="frame-comfyui-settings" data-src="/static/comfyui-settings.html?v=2026.06.30.1782971964" scrolling="yes"></iframe>
-            <iframe id="frame-canvas" data-src="/static/canvas-list.html?v=2026.06.30.1782971964" scrolling="yes"></iframe>
+            <!-- 幽灵登录横幅（仅在幽灵模式下显示） -->
+            <div id="impersonation-banner" class="impersonation-banner" style="display:none">
+                <div class="impersonation-banner-content">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="9" cy="7" r="4"></circle>
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                        <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                    </svg>
+                    <span id="impersonation-banner-text">幽灵模式</span>
+                </div>
+                <button class="impersonation-exit-btn" onclick="exitImpersonation()" data-i18n="admin.exitImpersonation">退出幽灵模式</button>
+            </div>
+            <iframe id="frame-zimage" data-src="/static/zimage.html?v=2026.07.02.1783072602" class="active" scrolling="yes"></iframe>
+            <iframe id="frame-enhance" data-src="/static/enhance.html?v=2026.07.02.1783072602" scrolling="yes"></iframe>
+            <iframe id="frame-klein" data-src="/static/klein.html?v=2026.07.02.1783072602" scrolling="yes"></iframe>
+            <iframe id="frame-angle" data-src="/static/angle.html?v=2026.07.02.1783072602" scrolling="yes"></iframe>
+            <iframe id="frame-online" data-src="/static/online.html?v=2026.07.02.1783072602" scrolling="yes"></iframe>
+            <iframe id="frame-gpt-chat" data-src="/static/gpt-chat.html?v=2026.07.02.1783072602" scrolling="yes"></iframe>
+            <iframe id="frame-asset-manager" data-src="/static/asset-manager.html?v=2026.07.02.1783066137" scrolling="yes"></iframe>
+            <iframe id="frame-api-settings" data-src="/static/api-settings.html?v=2026.07.02.1783072602" scrolling="yes"></iframe>
+            <iframe id="frame-comfyui-settings" data-src="/static/comfyui-settings.html?v=2026.07.02.1783072602" scrolling="yes"></iframe>
+            <iframe id="frame-canvas" data-src="/static/canvas-list.html?v=2026.07.02.1783072602" scrolling="yes"></iframe>
+            <iframe id="frame-admin" data-src="/static/admin.html?v=2026.07.02.1783072950" scrolling="yes"></iframe>
 
         </main>
     </div>
@@ -1761,8 +1832,12 @@
         const SIDEBAR_SETTINGS_COLLAPSED_KEY = 'studio_sidebar_settings_collapsed';
         const SIDEBAR_PINNED_KEY = 'studio_sidebar_pinned';
         const DEFAULT_PAGE_ID = 'zimage';
-        const PAGE_IDS = ['zimage','enhance','klein','angle','online','gpt-chat','canvas','asset-manager','api-settings','comfyui-settings'];
+        const PAGE_IDS = ['zimage','enhance','klein','angle','online','gpt-chat','canvas','asset-manager','api-settings','comfyui-settings','admin'];
         const LOCAL_PAGE_IDS = ['zimage','enhance','klein','angle'];
+        const IMPERSONATE_KEY = 'impersonate_user_id';
+        const IMPERSONATE_NAME_KEY = 'impersonate_user_name';
+        let currentUser = null;
+        let isAdmin = false;
         const PROJECT_URL = 'https://github.com/hero8152/Infinite-Canvas';
         let appInfo = { version:'', repo_url:PROJECT_URL, version_url:'https://raw.githubusercontent.com/hero8152/Infinite-Canvas/main/VERSION' };
         let updateConnectivityResult = null;
@@ -1890,6 +1965,13 @@
         window.addEventListener('message', event => {
             if (event.origin && event.origin !== location.origin) return;
             forwardStudioApiChange(event.data);
+            // 处理来自 iframe 的幽灵登录消息
+            const data = event.data || {};
+            if (data.type === 'impersonate-start' && data.userId) {
+                startImpersonation(data.userId, data.userName);
+            } else if (data.type === 'impersonate-end') {
+                exitImpersonation();
+            }
         });
 
         try {
@@ -1907,6 +1989,153 @@
             document.documentElement.classList.remove('studio-route-booting');
         }
         document.addEventListener('DOMContentLoaded', restoreActivePage, { once:true });
+
+        // ========== 幽灵登录（Impersonation）相关功能 ==========
+
+        /**
+         * 获取当前模拟的用户 ID
+         */
+        function getImpersonateId() {
+            try { return localStorage.getItem(IMPERSONATE_KEY) || null; } catch(e) { return null; }
+        }
+
+        /**
+         * 获取当前模拟的用户名
+         */
+        function getImpersonateName() {
+            try { return localStorage.getItem(IMPERSONATE_NAME_KEY) || null; } catch(e) { return null; }
+        }
+
+        /**
+         * 判断当前是否处于幽灵登录状态
+         */
+        function isImpersonating() {
+            return !!getImpersonateId();
+        }
+
+        /**
+         * 给 URL 附加 impersonate_user_id 参数（如果处于幽灵模式）
+         */
+        function addImpersonationParam(url) {
+            const impersonateId = getImpersonateId();
+            if (!impersonateId) return url;
+            if (!url || typeof url !== 'string') return url;
+            // 只对 /api/ 路径附加
+            if (url.startsWith('/api/') || url.startsWith(location.origin + '/api/')) {
+                const sep = url.includes('?') ? '&' : '?';
+                return url + sep + 'impersonate_user_id=' + encodeURIComponent(impersonateId);
+            }
+            return url;
+        }
+
+        /**
+         * 更新幽灵登录横幅显示
+         * fetch 拦截器在 i18n.js 中全局安装，所有 iframe 页面自动获得 impersonation 能力
+         */
+        function updateImpersonationBanner() {
+            const banner = document.getElementById('impersonation-banner');
+            const text = document.getElementById('impersonation-banner-text');
+            const stage = document.querySelector('.stage');
+            if (!banner) return;
+
+            if (isImpersonating()) {
+                const name = getImpersonateName() || '目标用户';
+                const isEn = window.StudioI18n?.lang?.() === 'en';
+                if (text) {
+                    text.textContent = isEn
+                        ? `Impersonating: ${name}`
+                        : `幽灵模式：您当前以「${name}」身份操作`;
+                }
+                banner.style.display = 'flex';
+                if (stage) stage.classList.add('has-impersonation-banner');
+            } else {
+                banner.style.display = 'none';
+                if (stage) stage.classList.remove('has-impersonation-banner');
+            }
+        }
+
+        /**
+         * 启动幽灵登录
+         */
+        function startImpersonation(userId, userName) {
+            try {
+                localStorage.setItem(IMPERSONATE_KEY, userId);
+                if (userName) localStorage.setItem(IMPERSONATE_NAME_KEY, userName);
+                updateImpersonationBanner();
+                // 刷新所有 iframe 以应用新的身份
+                reloadAllIframesWithImpersonation();
+            } catch(e) {
+                console.error('启动幽灵登录失败:', e);
+            }
+        }
+
+        /**
+         * 退出幽灵登录
+         */
+        function exitImpersonation() {
+            try {
+                localStorage.removeItem(IMPERSONATE_KEY);
+                localStorage.removeItem(IMPERSONATE_NAME_KEY);
+                updateImpersonationBanner();
+                // 刷新所有 iframe 恢复正常身份
+                reloadAllIframesWithImpersonation();
+            } catch(e) {
+                console.error('退出幽灵登录失败:', e);
+            }
+        }
+
+        /**
+         * 重新加载所有 iframe（带上 impersonation 参数或清除）
+         */
+        function reloadAllIframesWithImpersonation() {
+            const iframes = document.querySelectorAll('iframe');
+            const impersonateId = getImpersonateId();
+            iframes.forEach(frame => {
+                if (frame.src) {
+                    // 移除旧的 impersonate_user_id 参数
+                    let url = frame.src;
+                    url = url.replace(/[?&]impersonate_user_id=[^&]+/g, '');
+                    // 清理多余的 &
+                    url = url.replace(/\?&+/, '?').replace(/&+$/, '');
+                    if (url.endsWith('?')) url = url.slice(0, -1);
+                    // 加上新的参数（如果有）
+                    if (impersonateId) {
+                        const sep = url.includes('?') ? '&' : '?';
+                        url = url + sep + 'impersonate_user_id=' + encodeURIComponent(impersonateId);
+                    }
+                    frame.src = url;
+                }
+            });
+        }
+
+        /**
+         * 获取当前用户信息（含管理员判断）
+         */
+        async function fetchCurrentUser() {
+            try {
+                const res = await fetch('/api/auth/me', { credentials: 'include' });
+                if (res.ok) {
+                    const data = await res.json();
+                    currentUser = data;
+                    isAdmin = !!data.is_admin;
+                    updateAdminNavVisibility();
+                    return data;
+                }
+            } catch(e) {
+                console.error('获取当前用户信息失败:', e);
+            }
+            return null;
+        }
+
+        /**
+         * 更新管理员入口可见性
+         */
+        function updateAdminNavVisibility() {
+            const adminNavItems = document.querySelectorAll('.admin-nav-item');
+            adminNavItems.forEach(item => {
+                item.style.display = isAdmin ? '' : 'none';
+            });
+        }
 
         async function syncStatus() {
             try {
@@ -2037,6 +2266,10 @@
             if(window.StudioI18n) window.StudioI18n.apply();
             broadcastLanguage();
             checkForUpdates();
+            // 获取当前用户信息，显示管理员入口
+            fetchCurrentUser();
+            // 初始化幽灵登录横幅状态
+            updateImpersonationBanner();
         });
 
         // sync theme when iframe loads

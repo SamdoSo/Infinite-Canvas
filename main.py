@@ -11,6 +11,9 @@ import os
 import re
 import random
 import sys
+_app_dir = os.path.dirname(os.path.abspath(__file__))
+if _app_dir not in sys.path:
+    sys.path.insert(0, _app_dir)
 import subprocess
 import time
 import shutil
@@ -74,6 +77,23 @@ logging.basicConfig(
 logger = logging.getLogger("infinite-canvas")
 
 app = FastAPI()
+
+# --- 数据库与认证路由初始化 ---
+from db.connection import engine, get_db
+from db.models import Base, User
+from db.auth_routes import auth_router
+from db.admin_routes import admin_router
+from db.auth import get_current_user
+from sqlalchemy.orm import Session
+from fastapi import Depends
+import db.crud as crud
+
+# 自动创建并同步数据库表结构
+Base.metadata.create_all(bind=engine)
+
+# 挂载认证与管理 API 路由
+app.include_router(auth_router)
+app.include_router(admin_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1414,6 +1434,23 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 os.makedirs(WORKFLOW_DIR, exist_ok=True)
 os.makedirs(CONVERSATION_DIR, exist_ok=True)
 os.makedirs(CANVAS_DIR, exist_ok=True)
+@app.get("/assets/users/{user_id}/{path:path}")
+async def secure_user_assets(user_id: str, path: str, current_user: User = Depends(get_current_user)):
+    if current_user.id != user_id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="没有权限访问此素材")
+    file_path = os.path.join(ASSETS_DIR, "users", user_id, path)
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="素材不存在")
+    return FileResponse(file_path)
+
+@app.get("/assets/uploads/users/{user_id}/{path:path}")
+async def secure_user_uploads(user_id: str, path: str, current_user: User = Depends(get_current_user)):
+    if current_user.id != user_id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="没有权限访问此素材")
+    file_path = os.path.join(ASSETS_DIR, "uploads", "users", user_id, path)
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="素材不存在")
+    return FileResponse(file_path)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
@@ -3424,7 +3461,7 @@ def extract_canvas_assets(canvas):
             items.append(item)
     return items
 
-def canvas_assets_index():
+def canvas_assets_index(user_id=None):
     canvases = []
     items = []
     canvas_counts = {"all": 0, "smart": 0, "classic": 0}
@@ -3439,6 +3476,8 @@ def canvas_assets_index():
         except Exception:
             continue
         if canvas.get("deleted_at"):
+            continue
+        if user_id and canvas.get("owner") != user_id:
             continue
         record = canvas_record(canvas)
         canvas_items = extract_canvas_assets(canvas)
@@ -5024,8 +5063,17 @@ async def wait_for_image_task(client, task_id, provider=None):
     extra = f"，最后响应：{raw_text}" if raw_text else ""
     raise HTTPException(status_code=504, detail=f"生图任务超时（已等待 {int(timeout)} 秒），task_id={task_id}{extra}")
 
+from db.context import current_user_id_var
+
 def output_storage(category="output"):
-    return (OUTPUT_INPUT_DIR, "input") if category == "input" else (OUTPUT_OUTPUT_DIR, "output")
+    user_id = current_user_id_var.get()
+    if user_id:
+        user_assets_dir = os.path.join(ASSETS_DIR, "users", user_id)
+        target_dir = os.path.join(user_assets_dir, category)
+        os.makedirs(target_dir, exist_ok=True)
+        return (target_dir, f"users/{user_id}/{category}")
+    else:
+        return (OUTPUT_INPUT_DIR, "input") if category == "input" else (OUTPUT_OUTPUT_DIR, "output")
 
 def output_url_for(filename, category="output"):
     _, subdir = output_storage(category)
@@ -5509,7 +5557,7 @@ ASSET_CLASSIFICATION_DIMENSION_NAMES = {
 }
 
 def _local_upload_classification_path(filename):
-    return os.path.splitext(os.path.join(LOCAL_UPLOAD_DIR, filename))[0] + ".classification.json"
+    return os.path.splitext(os.path.join(get_local_upload_dir(), filename))[0] + ".classification.json"
 
 def _safe_asset_tag(value, limit=24):
     text = re.sub(r"\s+", " ", str(value or "").strip())
@@ -9442,7 +9490,7 @@ def download_output(request: Request, url: str, name: str = "", inline: bool = F
     return StreamingResponse(stream_remote(), media_type=content_type, headers=headers, status_code=upstream.status_code)
 
 @app.post("/api/upload")
-async def upload_image(files: List[UploadFile] = File(...)):
+async def upload_image(files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user)):
     uploaded_files = []
     files_content = []
     for file in files:
@@ -9470,7 +9518,7 @@ async def upload_image(files: List[UploadFile] = File(...)):
     return {"files": uploaded_files}
 
 @app.post("/api/ai/upload")
-async def upload_ai_reference(files: List[UploadFile] = File(...)):
+async def upload_ai_reference(files: List[UploadFile] = File(...), current_user: User = Depends(get_current_user)):
     uploaded = []
     image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
     video_exts = {".mp4", ".webm", ".mov", ".m4v", ".flv"}
@@ -9519,7 +9567,7 @@ class Base64UploadRequest(BaseModel):
     content_type: str = ""
 
 @app.post("/api/ai/upload-base64")
-async def upload_ai_base64(payload: Base64UploadRequest):
+async def upload_ai_base64(payload: Base64UploadRequest, current_user: User = Depends(get_current_user)):
     """以 base64 JSON 方式上传字节到 assets/input，返回 /assets 地址。
     给不便用 multipart/FormData 的客户端（如 PS UXP 面板）用——UXP 的 fetch+FormData 经常发不出有效 multipart。"""
     raw = (payload.data or "").strip()
@@ -9546,7 +9594,7 @@ async def upload_ai_base64(payload: Base64UploadRequest):
     return {"files": [{"url": output_url_for(filename, "input"), "name": payload.name or filename, "kind": kind}]}
 
 @app.post("/api/comfyui/upload-base64")
-async def upload_comfyui_base64(payload: Base64UploadRequest):
+async def upload_comfyui_base64(payload: Base64UploadRequest, current_user: User = Depends(get_current_user)):
     """base64 方式把图片传到 ComfyUI 各后端的 input 目录，返回 comfy 用文件名（供 UXP 做 ComfyUI 图生图）。"""
     raw = (payload.data or "").strip()
     ct = (payload.content_type or "").split(";", 1)[0].strip().lower()
@@ -9612,10 +9660,19 @@ def _local_upload_rel_path(value):
         raise HTTPException(status_code=400, detail="非法路径")
     return norm
 
+def get_local_upload_dir():
+    user_id = current_user_id_var.get()
+    if user_id:
+        path = os.path.join(ASSETS_DIR, "uploads", "users", user_id)
+        os.makedirs(path, exist_ok=True)
+        return path
+    return LOCAL_UPLOAD_DIR
+
 def _local_upload_abs(rel):
     rel_path = _local_upload_rel_path(rel)
-    path = os.path.abspath(os.path.join(LOCAL_UPLOAD_DIR, rel_path))
-    root = os.path.abspath(LOCAL_UPLOAD_DIR)
+    upload_dir = get_local_upload_dir()
+    path = os.path.abspath(os.path.join(upload_dir, rel_path))
+    root = os.path.abspath(upload_dir)
     try:
         common = os.path.commonpath([root, path])
     except ValueError:
@@ -9650,7 +9707,7 @@ def _local_upload_safe_file_stem(name):
     return cleaned[:120]
 
 def _local_upload_caption_path(filename):
-    return os.path.splitext(os.path.join(LOCAL_UPLOAD_DIR, filename))[0] + ".txt"
+    return os.path.splitext(os.path.join(get_local_upload_dir(), filename))[0] + ".txt"
 
 def _read_local_upload_caption(filename):
     caption_path = _local_upload_caption_path(filename)
@@ -9667,7 +9724,7 @@ def _read_local_upload_caption(filename):
     return text, os.path.basename(caption_path)
 
 def _local_upload_item(filename):
-    path = os.path.join(LOCAL_UPLOAD_DIR, filename)
+    path = os.path.join(get_local_upload_dir(), filename)
     rel = _local_upload_rel_path(filename)
     try:
         stat = os.stat(path)
@@ -9713,12 +9770,13 @@ def _local_upload_folder_node(path="", name="全部上传"):
     }
 
 def _local_upload_tree_and_items():
+    upload_dir = get_local_upload_dir()
     root_node = _local_upload_folder_node("", "全部上传")
     folder_map = {"": root_node}
     items = []
-    for current, dirs, files in os.walk(LOCAL_UPLOAD_DIR):
+    for current, dirs, files in os.walk(upload_dir):
         dirs[:] = sorted([d for d in dirs if not d.startswith(".") and not d.startswith("._")], key=str.lower)
-        rel_dir = os.path.relpath(current, LOCAL_UPLOAD_DIR).replace("\\", "/")
+        rel_dir = os.path.relpath(current, upload_dir).replace("\\", "/")
         if rel_dir == ".":
             rel_dir = ""
         node = folder_map.get(rel_dir)
@@ -9850,7 +9908,7 @@ def migrate_mislabeled_image_extensions():
         logger.info(f"纠正图片扩展名(内容与后缀不符): {fixed} 个")
 
 @app.post("/api/local-assets/upload")
-async def upload_local_assets(files: List[UploadFile] = File(...), folder: str = Form("")):
+async def upload_local_assets(files: List[UploadFile] = File(...), folder: str = Form(""), current_user: User = Depends(get_current_user)):
     uploaded = []
     folder_rel, folder_abs = _local_upload_safe_folder(folder)
     os.makedirs(folder_abs, exist_ok=True)
@@ -9877,7 +9935,7 @@ async def upload_local_assets(files: List[UploadFile] = File(...), folder: str =
     return {"files": uploaded}
 
 @app.post("/api/local-assets/import-urls")
-async def import_local_assets_from_urls(payload: LocalAssetUrlImportRequest):
+async def import_local_assets_from_urls(payload: LocalAssetUrlImportRequest, current_user: User = Depends(get_current_user)):
     uploaded = []
     results = []
     folder_rel, folder_abs = _local_upload_safe_folder(payload.folder)
@@ -9952,12 +10010,12 @@ async def import_local_assets_from_urls(payload: LocalAssetUrlImportRequest):
     return {"ok": True, "count": len(uploaded), "files": uploaded, "items": results}
 
 @app.get("/api/local-assets")
-async def list_local_assets():
+async def list_local_assets(current_user: User = Depends(get_current_user)):
     tree, items = _local_upload_tree_and_items()
     return {"items": items, "tree": tree}
 
 @app.post("/api/local-assets/folders")
-async def create_local_asset_folder(payload: LocalAssetFolderRequest, request: Request):
+async def create_local_asset_folder(payload: LocalAssetFolderRequest, request: Request, current_user: User = Depends(get_current_user)):
     ensure_same_origin_request(request)
     parent_rel, parent_abs = _local_upload_safe_folder(payload.parent)
     if not os.path.isdir(parent_abs):
@@ -9972,7 +10030,7 @@ async def create_local_asset_folder(payload: LocalAssetFolderRequest, request: R
     return {"ok": True, "folder": {"path": rel, "name": name}, "tree": tree, "items": items}
 
 @app.patch("/api/local-assets/folders")
-async def rename_local_asset_folder(payload: LocalAssetFolderRequest, request: Request):
+async def rename_local_asset_folder(payload: LocalAssetFolderRequest, request: Request, current_user: User = Depends(get_current_user)):
     ensure_same_origin_request(request)
     rel, abs_path = _local_upload_safe_folder(payload.path)
     if not rel:
@@ -9990,7 +10048,7 @@ async def rename_local_asset_folder(payload: LocalAssetFolderRequest, request: R
     return {"ok": True, "folder": {"path": new_rel, "name": name}, "tree": tree, "items": items}
 
 @app.patch("/api/local-assets/items")
-async def rename_local_asset_item(payload: LocalAssetRenameRequest, request: Request):
+async def rename_local_asset_item(payload: LocalAssetRenameRequest, request: Request, current_user: User = Depends(get_current_user)):
     ensure_same_origin_request(request)
     rel, abs_path = _local_upload_safe_path(payload.path)
     if not os.path.isfile(abs_path):
@@ -10021,7 +10079,7 @@ async def rename_local_asset_item(payload: LocalAssetRenameRequest, request: Req
     return {"ok": True, "item": _local_upload_item(new_rel), "old_path": rel, "tree": tree, "items": items}
 
 @app.post("/api/local-assets/delete")
-async def delete_local_assets(payload: dict, request: Request):
+async def delete_local_assets(payload: dict, request: Request, current_user: User = Depends(get_current_user)):
     ensure_same_origin_request(request)
     names = payload.get("names") if isinstance(payload, dict) else None
     if not isinstance(names, list):
@@ -10047,7 +10105,7 @@ async def delete_local_assets(payload: dict, request: Request):
     return {"deleted": deleted}
 
 @app.post("/api/local-assets/move")
-async def move_local_assets(payload: dict, request: Request):
+async def move_local_assets(payload: dict, request: Request, current_user: User = Depends(get_current_user)):
     """把选中的本地素材移动到目标文件夹（folder 为空表示根目录）；连同 .txt / .classification.json 兄弟文件一起搬。"""
     ensure_same_origin_request(request)
     names = payload.get("names") if isinstance(payload, dict) else None
@@ -10092,7 +10150,7 @@ async def move_local_assets(payload: dict, request: Request):
     return {"ok": True, "moved": moved, "items": items, "tree": tree}
 
 @app.post("/api/local-assets/caption")
-async def caption_local_assets(payload: LocalAssetCaptionRequest):
+async def caption_local_assets(payload: LocalAssetCaptionRequest, current_user: User = Depends(get_current_user)):
     prompt = (payload.prompt or "描述图片").strip() or "描述图片"
     items = []
     ok_count = 0
@@ -10131,7 +10189,7 @@ async def caption_local_assets(payload: LocalAssetCaptionRequest):
     return {"ok": True, "count": ok_count, "items": items}
 
 @app.post("/api/local-assets/classify")
-async def classify_local_assets(payload: LocalAssetClassifyRequest):
+async def classify_local_assets(payload: LocalAssetClassifyRequest, current_user: User = Depends(get_current_user)):
     items = []
     ok_count = 0
     for name in (payload.names or [])[:80]:
@@ -10167,7 +10225,7 @@ async def classify_local_assets(payload: LocalAssetClassifyRequest):
     return {"ok": True, "count": ok_count, "items": items}
 
 @app.patch("/api/local-assets/caption")
-async def save_local_asset_caption(payload: LocalAssetCaptionSaveRequest):
+async def save_local_asset_caption(payload: LocalAssetCaptionSaveRequest, current_user: User = Depends(get_current_user)):
     filename, path = _local_upload_safe_path(payload.name)
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="文件不存在")
@@ -12739,23 +12797,23 @@ async def canvas_llm(payload: CanvasLLMRequest):
 # --- 对话管理 ---
 
 @app.get("/api/conversations")
-async def conversations(request: Request, x_user_id: str = Header(default="")):
-    user_id = safe_user_id(x_user_id, request)
+async def conversations(current_user: User = Depends(get_current_user)):
+    user_id = current_user.id
     return {"user_id": user_id, "conversations": list_conversations(user_id)}
 
 @app.post("/api/conversations")
-async def create_conversation(payload: ConversationCreateRequest, request: Request, x_user_id: str = Header(default="")):
-    user_id = safe_user_id(x_user_id, request)
+async def create_conversation(payload: ConversationCreateRequest, current_user: User = Depends(get_current_user)):
+    user_id = current_user.id
     return {"conversation": new_conversation(user_id, payload.title)}
 
 @app.get("/api/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str, request: Request, x_user_id: str = Header(default="")):
-    user_id = safe_user_id(x_user_id, request)
+async def get_conversation(conversation_id: str, current_user: User = Depends(get_current_user)):
+    user_id = current_user.id
     return {"conversation": load_conversation(user_id, conversation_id)}
 
 @app.delete("/api/conversations/{conversation_id}")
-async def delete_conversation(conversation_id: str, request: Request, x_user_id: str = Header(default="")):
-    user_id = safe_user_id(x_user_id, request)
+async def delete_conversation(conversation_id: str, current_user: User = Depends(get_current_user)):
+    user_id = current_user.id
     path = conversation_path(user_id, conversation_id)
     if os.path.exists(path):
         os.remove(path)
@@ -12764,120 +12822,128 @@ async def delete_conversation(conversation_id: str, request: Request, x_user_id:
 # --- 画布管理 ---
 
 @app.get("/api/canvases")
-async def canvases():
-    return {"canvases": list_canvases()}
+async def canvases(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return {"canvases": crud.list_canvases_for_user(db, current_user.id, is_deleted=False)}
 
 @app.get("/api/projects")
-async def get_projects():
-    return {"projects": list_projects()}
+async def get_projects(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return {"projects": crud.list_projects_for_user(db, current_user.id)}
 
 @app.post("/api/projects")
-async def create_project(payload: ProjectCreateRequest):
-    return {"project": project_record(new_project(payload.name))}
+async def create_project(payload: ProjectCreateRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    proj = crud.create_project_for_user(db, current_user.id, payload.name)
+    return {"project": {
+        "id": proj.id,
+        "name": proj.name,
+        "order": proj.order,
+        "created_at": int(proj.created_at.timestamp() * 1000),
+        "updated_at": int(proj.updated_at.timestamp() * 1000)
+    }}
 
 @app.post("/api/projects/{project_id}")
-async def update_project(project_id: str, payload: ProjectUpdateRequest):
-    projects = ensure_default_project()
-    target = next((p for p in projects if p.get("id") == project_id), None)
-    if not target:
+async def update_project(project_id: str, payload: ProjectUpdateRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    proj = crud.update_project_for_user(db, current_user.id, project_id, payload.name, payload.order)
+    if not proj:
         raise HTTPException(status_code=404, detail="项目不存在")
-    if payload.name is not None:
-        target["name"] = (str(payload.name).strip() or target.get("name") or "未命名项目")[:60]
-    if payload.order is not None:
-        target["order"] = int(payload.order)
-    target["updated_at"] = now_ms()
-    save_projects(projects)
-    return {"project": project_record(target)}
+    return {"project": {
+        "id": proj.id,
+        "name": proj.name,
+        "order": proj.order,
+        "created_at": int(proj.created_at.timestamp() * 1000),
+        "updated_at": int(proj.updated_at.timestamp() * 1000)
+    }}
 
 @app.delete("/api/projects/{project_id}")
-async def delete_project(project_id: str):
-    """删除项目：默认项目不可删除；其余项目删除后，其下画布回归默认项目（不删画布）。"""
-    if project_id == DEFAULT_PROJECT_ID:
+async def delete_project(project_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if project_id == "default":
         raise HTTPException(status_code=400, detail="默认项目不可删除")
-    projects = ensure_default_project()
-    if not any(p.get("id") == project_id for p in projects):
-        raise HTTPException(status_code=404, detail="项目不存在")
-    projects = [p for p in projects if p.get("id") != project_id]
-    save_projects(projects)
-    # 把该项目下的画布迁回默认项目
-    moved = 0
-    with CANVAS_LOCK:
-        for filename in os.listdir(CANVAS_DIR):
-            if not filename.endswith(".json"):
-                continue
-            path = os.path.join(CANVAS_DIR, filename)
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            except Exception:
-                continue
-            if str(data.get("project") or "") == project_id:
-                data["project"] = DEFAULT_PROJECT_ID
-                with open(path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                moved += 1
-    return {"ok": True, "moved": moved}
+    success = crud.delete_project_for_user(db, current_user.id, project_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="项目不存在或无权限删除")
+    return {"ok": True}
 
 @app.get("/api/canvases/trash")
-async def trashed_canvases():
-    return {"canvases": list_deleted_canvases(), "retention_days": 30}
+async def trashed_canvases(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    conf = db.query(crud.SystemConfig).filter(crud.SystemConfig.key == "data_retention_days").first()
+    retention_days = int(conf.value) if conf else 0
+    return {"canvases": crud.list_canvases_for_user(db, current_user.id, is_deleted=True), "retention_days": retention_days or 30}
 
 @app.post("/api/canvases")
-async def create_canvas(payload: CanvasCreateRequest):
-    return {"canvas": new_canvas(payload.title, payload.icon, payload.kind, payload.project, payload.board_x, payload.board_y)}
+async def create_canvas(payload: CanvasCreateRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    canvas = crud.create_canvas_for_user(
+        db, current_user.id, payload.title, payload.icon, payload.kind, payload.project, payload.board_x, payload.board_y
+    )
+    return {"canvas": canvas}
 
 @app.get("/api/canvases/{canvas_id}/meta")
-async def get_canvas_meta(canvas_id: str):
-    canvas = load_canvas(canvas_id)
+async def get_canvas_meta(canvas_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    canvas = crud.get_canvas_for_user(db, current_user.id, canvas_id)
+    if not canvas:
+        raise HTTPException(status_code=404, detail="画布不存在")
     return {
         "id": canvas.get("id"),
         "updated_at": canvas.get("updated_at", 0),
         "title": canvas.get("title", "未命名画布"),
         "icon": canvas.get("icon", "layers"),
-        "kind": normalize_canvas_kind(canvas.get("kind")),
+        "kind": crud.normalize_canvas_kind(canvas.get("kind")),
     }
 
 @app.post("/api/canvases/{canvas_id}/meta")
-async def update_canvas_meta(canvas_id: str, payload: CanvasMetaUpdate):
-    """更新画布的轻量元数据（标题/图标/负责人/颜色/置顶）。
-    刻意不走 save_canvas（它会刷新 updated_at），以免打标签/置顶把画布顶到列表最前。"""
-    canvas = load_canvas(canvas_id)
+async def update_canvas_meta(canvas_id: str, payload: CanvasMetaUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    updates = {}
     if payload.title is not None:
-        canvas["title"] = (payload.title or canvas.get("title") or "未命名画布")[:80]
+        updates["title"] = payload.title
     if payload.icon is not None:
-        canvas["icon"] = (payload.icon or "layers")[:32]
+        updates["icon"] = payload.icon
     if payload.owner is not None:
-        canvas["owner"] = str(payload.owner).strip()[:40]
+        updates["owner"] = payload.owner
     if payload.color is not None:
-        canvas["color"] = normalize_canvas_color(payload.color)
+        updates["color"] = payload.color
     if payload.pinned is not None:
-        canvas["pinned"] = bool(payload.pinned)
+        updates["pinned"] = payload.pinned
     if payload.project is not None:
-        canvas["project"] = str(payload.project).strip() or DEFAULT_PROJECT_ID
+        updates["project"] = payload.project
     if payload.board_x is not None:
-        canvas["board_x"] = float(payload.board_x)
+        updates["board_x"] = payload.board_x
     if payload.board_y is not None:
-        canvas["board_y"] = float(payload.board_y)
-    with CANVAS_LOCK:
-        with open(canvas_path(canvas["id"]), 'w', encoding='utf-8') as f:
-            json.dump(canvas, f, ensure_ascii=False, indent=2)
-    return {"canvas": canvas_record(canvas)}
+        updates["board_y"] = payload.board_y
+        
+    canvas = crud.update_canvas_meta_for_user(db, current_user.id, canvas_id, updates)
+    if not canvas:
+        raise HTTPException(status_code=404, detail="画布不存在或无权更新")
+    return {"canvas": canvas}
 
 @app.get("/api/canvases/{canvas_id}")
-async def get_canvas(canvas_id: str):
-    return {"canvas": load_canvas(canvas_id)}
+async def get_canvas(canvas_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    canvas = crud.get_canvas_for_user(db, current_user.id, canvas_id)
+    if not canvas:
+        raise HTTPException(status_code=404, detail="画布不存在")
+    return {"canvas": canvas}
 
 @app.post("/api/canvases/{canvas_id}/touch")
-async def touch_canvas(canvas_id: str):
-    canvas = load_canvas(canvas_id)
-    save_canvas(canvas)
-    return {"canvas": canvas_record(canvas), "updated_at": canvas.get("updated_at", 0)}
+async def touch_canvas(canvas_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    canvas = crud.get_canvas_for_user(db, current_user.id, canvas_id)
+    if not canvas:
+        raise HTTPException(status_code=404, detail="画布不存在")
+    canvas = crud.save_canvas_for_user(db, current_user.id, canvas_id, canvas)
+    return {"canvas": {
+        "id": canvas["id"],
+        "title": canvas["title"],
+        "icon": canvas["icon"],
+        "kind": canvas["kind"],
+        "owner": canvas.get("owner", ""),
+        "color": canvas.get("color", ""),
+        "pinned": canvas.get("pinned", False),
+        "project": canvas.get("project", "default"),
+        "created_at": canvas["created_at"],
+        "updated_at": canvas["updated_at"]
+    }, "updated_at": canvas.get("updated_at", 0)}
 
 @app.get("/api/canvas-assets")
-async def list_canvas_assets():
+async def list_canvas_assets(current_user: User = Depends(get_current_user)):
     # canvas_assets_index 会同步遍历并解析所有画布 JSON，放进线程池避免阻塞事件循环
     # （否则画布多时一次请求就会卡住整个 asyncio loop，连 WebSocket 一起掉线）。
-    return await asyncio.to_thread(canvas_assets_index)
+    return await asyncio.to_thread(canvas_assets_index, current_user.id)
 
 @app.get("/api/smart-canvas/prompt-templates")
 async def smart_canvas_prompt_templates():
@@ -12890,12 +12956,19 @@ async def smart_canvas_prompt_templates():
         return {"templates": []}
 
 @app.post("/api/canvas-assets/check")
-async def check_canvas_assets(payload: CanvasAssetCheckRequest):
+async def check_canvas_assets(payload: CanvasAssetCheckRequest, current_user: User = Depends(get_current_user)):
     result = {}
     for url in payload.urls[:3000]:
         text = str(url or "").strip()
         if not text:
             continue
+        if "/users/" in text:
+            parts = text.split("/users/", 1)[1].split("/", 1)
+            if parts:
+                owner_id = parts[0]
+                if owner_id != current_user.id and not current_user.is_admin:
+                    result[text] = False
+                    continue
         if text.startswith("/output/") or text.startswith("/assets/"):
             result[text] = bool(output_file_from_url(text))
         else:
@@ -12903,7 +12976,7 @@ async def check_canvas_assets(payload: CanvasAssetCheckRequest):
     return {"exists": result}
 
 @app.post("/api/canvas-assets/download")
-async def download_canvas_assets(payload: CanvasAssetDownloadRequest):
+async def download_canvas_assets(payload: CanvasAssetDownloadRequest, current_user: User = Depends(get_current_user)):
     buffer = BytesIO()
     used_names = set()
     count = 0
@@ -12918,6 +12991,12 @@ async def download_canvas_assets(payload: CanvasAssetDownloadRequest):
                 requested_name = ""
             if not text:
                 continue
+            if "/users/" in text:
+                parts = text.split("/users/", 1)[1].split("/", 1)
+                if parts:
+                    owner_id = parts[0]
+                    if owner_id != current_user.id and not current_user.is_admin:
+                        continue
             path = output_file_from_url(text)
             content = None
             content_type = ""
@@ -13960,8 +14039,10 @@ async def batch_crop_asset_library_items(payload: AssetLibraryBatchCropRequest):
     return {"library": lib, "added": len(added), "items": added}
 
 @app.put("/api/canvases/{canvas_id}")
-async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
-    canvas = load_canvas(canvas_id)
+async def update_canvas(canvas_id: str, payload: CanvasSaveRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    canvas = crud.get_canvas_for_user(db, current_user.id, canvas_id)
+    if not canvas:
+        raise HTTPException(status_code=404, detail="画布不存在")
     current_updated_at = int(canvas.get("updated_at") or 0)
     if payload.base_updated_at and current_updated_at and int(payload.base_updated_at) < current_updated_at:
         raise HTTPException(status_code=409, detail={
@@ -13971,7 +14052,7 @@ async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
         })
     canvas["title"] = (payload.title or canvas.get("title") or "未命名画布")[:80]
     canvas["icon"] = (payload.icon or canvas.get("icon") or "layers")[:32]
-    canvas["kind"] = normalize_canvas_kind(canvas.get("kind"))
+    canvas["kind"] = crud.normalize_canvas_kind(canvas.get("kind"))
     canvas["nodes"] = payload.nodes
     canvas["connections"] = payload.connections
     if canvas["kind"] == "smart":
@@ -13980,38 +14061,37 @@ async def update_canvas(canvas_id: str, payload: CanvasSaveRequest):
         canvas["viewport"] = canvas.get("viewport") or {"x": 0, "y": 0, "scale": 1}
     canvas["logs"] = payload.logs[-500:]
     canvas["settings"] = payload.settings or {}
-    save_canvas(canvas)
+    
+    crud.save_canvas_for_user(db, current_user.id, canvas_id, canvas)
     await manager.broadcast_canvas_updated(canvas_id, int(canvas.get("updated_at") or now_ms()), payload.client_id)
     return {"canvas": canvas}
 
 @app.delete("/api/canvases/{canvas_id}")
-async def delete_canvas(canvas_id: str):
-    canvas = load_canvas_any(canvas_id)
-    if not canvas.get("deleted_at"):
-        canvas["deleted_at"] = now_ms()
-        save_canvas(canvas)
+async def delete_canvas(canvas_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    success = crud.delete_canvas_for_user(db, current_user.id, canvas_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="画布不存在或已删除")
     return {"ok": True}
 
 @app.post("/api/canvases/{canvas_id}/restore")
-async def restore_canvas(canvas_id: str):
-    canvas = load_canvas_any(canvas_id)
-    if canvas.get("deleted_at"):
-        canvas.pop("deleted_at", None)
-        save_canvas(canvas)
+async def restore_canvas(canvas_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    canvas = crud.restore_canvas_for_user(db, current_user.id, canvas_id)
+    if not canvas:
+        raise HTTPException(status_code=404, detail="画布不存在或未处于回收站中")
     return {"canvas": canvas}
 
 @app.delete("/api/canvases/{canvas_id}/purge")
-async def purge_canvas(canvas_id: str):
-    path = canvas_path(canvas_id)
-    if os.path.exists(path):
-        os.remove(path)
+async def purge_canvas(canvas_id: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    success = crud.purge_canvas_permanently_for_user(db, current_user.id, canvas_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="画布不存在")
     return {"ok": True}
 
 # --- GPT 对话 ---
 
 @app.post("/api/chat")
-async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(default="")):
-    user_id = safe_user_id(x_user_id, request)
+async def chat(payload: ChatRequest, current_user: User = Depends(get_current_user)):
+    user_id = current_user.id
     conversation = (
         load_conversation(user_id, payload.conversation_id)
         if payload.conversation_id
@@ -14123,8 +14203,8 @@ async def chat(payload: ChatRequest, request: Request, x_user_id: str = Header(d
     return {"conversation": conversation, "message": assistant_message}
 
 @app.post("/api/chat/agent")
-async def chat_agent(payload: ChatRequest, request: Request, x_user_id: str = Header(default="")):
-    user_id = safe_user_id(x_user_id, request)
+async def chat_agent(payload: ChatRequest, current_user: User = Depends(get_current_user)):
+    user_id = current_user.id
     conversation = (
         load_conversation(user_id, payload.conversation_id)
         if payload.conversation_id
@@ -14209,11 +14289,11 @@ async def chat_agent(payload: ChatRequest, request: Request, x_user_id: str = He
     return {"conversation": conversation, "message": assistant_message, "agent": {"action": action, "decision": decision}}
 
 @app.post("/api/chat/stream")
-async def chat_stream(payload: ChatRequest, request: Request, x_user_id: str = Header(default="")):
+async def chat_stream(payload: ChatRequest, current_user: User = Depends(get_current_user)):
     if payload.mode == "image":
         raise HTTPException(status_code=400, detail="图片模式请使用 /api/chat")
 
-    user_id = safe_user_id(x_user_id, request)
+    user_id = current_user.id
     conversation = (
         load_conversation(user_id, payload.conversation_id)
         if payload.conversation_id

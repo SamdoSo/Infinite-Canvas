@@ -188,4 +188,34 @@
         if(event.key === SCALE_KEY) applyScale(currentScaleMode());
     });
     window.addEventListener('resize', scheduleAutoScaleRefresh);
+
+    // Global Authentication Guard & API Fetch Interceptor
+    (function() {
+        const path = window.location.pathname;
+        const isAuthPage = path.endsWith('/login.html') || path.endsWith('/register.html');
+
+        if (!isAuthPage) {
+            // Guard check
+            if (localStorage.getItem('isLoggedIn') !== 'true') {
+                window.location.href = '/static/login.html?redirect=' + encodeURIComponent(window.location.pathname + window.location.search);
+                return;
+            }
+        }
+
+        // Global Fetch 401 Interceptor
+        const origFetch = window.fetch;
+        window.fetch = async function(...args) {
+            try {
+                const response = await origFetch(...args);
+                if (response.status === 401 && !isAuthPage) {
+                    localStorage.removeItem('isLoggedIn');
+                    localStorage.removeItem('user_info');
+                    window.location.href = '/static/login.html?expired=1&redirect=' + encodeURIComponent(window.location.pathname + window.location.search);
+                }
+                return response;
+            } catch (error) {
+                throw error;
+            }
+        };
+    })();
 })();
