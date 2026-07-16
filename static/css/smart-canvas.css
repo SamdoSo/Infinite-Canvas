@@ -14,6 +14,26 @@ body { margin:0; height:100vh; overflow:hidden; color:var(--text); font-family:'
 button,input,select,textarea { font:inherit; }
 button { border:0; cursor:pointer; }
 .shell { position:relative; width:100vw; height:100vh; overflow:hidden; background-color:var(--page); background-image:radial-gradient(var(--grid) 1px, transparent 1px); background-size:24px 24px; cursor:grab; }
+html[data-studio-scale="off"].studio-scale-managed .smart-back,
+html[data-studio-scale="off"].studio-scale-managed .smart-title,
+html[data-studio-scale="off"].studio-scale-managed .smart-log-toggle,
+html[data-studio-scale="off"].studio-scale-managed .smart-shortcut-toggle,
+html[data-studio-scale="off"].studio-scale-managed .smart-workflow-toggle,
+html[data-studio-scale="off"].studio-scale-managed .asset-toggle,
+/* 注意：.composer 不能加进这份 zoom 列表——它在 .world 内用世界坐标定位，
+   单独 zoom 会让坐标按 scale 重算，离原点越远偏移越大（小屏下直接飞出屏幕外） */
+html[data-studio-scale="off"].studio-scale-managed .smart-minimap,
+html[data-studio-scale="off"].studio-scale-managed .smart-log-panel,
+html[data-studio-scale="off"].studio-scale-managed .shortcut-panel,
+html[data-studio-scale="off"].studio-scale-managed .workflow-panel,
+html[data-studio-scale="off"].studio-scale-managed .asset-panel,
+html[data-studio-scale="off"].studio-scale-managed .asset-dock,
+html[data-studio-scale="off"].studio-scale-managed .asset-dialog,
+html[data-studio-scale="off"].studio-scale-managed .asset-hover-preview,
+html[data-studio-scale="off"].studio-scale-managed .image-edit-modal,
+html[data-studio-scale="off"].studio-scale-managed .preview-modal {
+    zoom: var(--studio-ui-scale, 1);
+}
 .shell.panning { cursor:grabbing; }
 .shell.zoom-preview { cursor:crosshair; }
 .world { position:absolute; left:0; top:0; width:6000px; height:4000px; transform-origin:0 0; }
@@ -432,6 +452,14 @@ video.node-img { object-fit:cover; background:#0f172a; }
 .connection-layer .conn-hit { pointer-events:stroke; cursor:pointer; }
 .connection-layer .conn-cut { pointer-events:auto; cursor:pointer; opacity:.55; transition:opacity .14s ease; }
 .connection-layer .conn-cut:hover { opacity:1; }
+.shell.connection-erasing, .shell.connection-erasing .connection-layer .conn-hit, .shell.connection-erasing .connection-layer .conn-cut { cursor:crosshair !important; }
+.connection-layer .conn-erasing-mark.conn-line { stroke:#ef4444 !important; opacity:.42 !important; stroke-dasharray:4 5; }
+.connection-layer .conn-erasing-mark.conn-end { fill:#ef4444 !important; opacity:.36 !important; }
+.connection-layer .conn-erasing-mark.conn-cut { opacity:.28 !important; }
+.connection-erase-trail { position:absolute; inset:0; z-index:24; width:100%; height:100%; pointer-events:none; overflow:visible; opacity:1; transition:opacity .18s ease; }
+.connection-erase-trail.fading { opacity:0; }
+.connection-erase-trail-glow { stroke:rgba(239,68,68,.22); stroke-width:13; stroke-linecap:round; stroke-linejoin:round; }
+.connection-erase-trail-line { stroke:rgba(239,68,68,.92); stroke-width:2.4; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:7 5; }
 .connection-layer .conn-pending { stroke-dasharray:5 4; animation:dash-flow-pending .9s linear infinite; }
 .connection-layer .conn-cascade { filter:none; }
 .connection-layer .conn-cascade-wait { stroke-dasharray:7 6; opacity:.58; }

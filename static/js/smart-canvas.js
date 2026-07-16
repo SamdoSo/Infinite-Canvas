@@ -91,6 +91,7 @@ let mentionInsertMode = 'token';
 let panState = null;
 let didPan = false;
 let portDragState = null;
+let connectionEraseState = null;
 let saveTimer = null;
 let apiProviders = [];
 let comfyWorkflows = [];
@@ -304,7 +305,7 @@ let settings = {
     provider_id:'',
     model:'',
     ratio:'square',
-    resolution:'auto',
+    resolution:'4k',
     customRatio:'',
     customRatioWidth:'',
     customRatioHeight:'',
@@ -556,6 +557,7 @@ function bindSmartPreviewImageFallbacks(root=document){
 const SMART_SELECTED_HIGH_RES_DELAY = 320;
 let smartSelectedHighResTimer = 0;
 let smartSelectedHighResSeq = 0;
+let smartSelectedHighResNodeIds = new Set();
 const smartSelectedHighResLoaded = new Set();
 const smartSelectedHighResLoading = new Map();
 function smartImageEditorIsOpen(){
@@ -578,31 +580,50 @@ function preloadSmartSelectedHighRes(src){
     smartSelectedHighResLoading.set(src, task);
     return task;
 }
-function syncSmartSelectedImageResolution(root=world){
+function smartNodeElementsByIds(ids){
+    const wanted = ids instanceof Set ? ids : new Set(ids || []);
+    const elements = [];
+    if(!wanted.size) return elements;
+    world.querySelectorAll?.('.image-node').forEach(el => {
+        const id = el.dataset?.id || '';
+        if(wanted.has(id)) elements.push(el);
+    });
+    return elements;
+}
+function smartNodeElementsForHighResSync(root){
+    if(root && root !== world) return [root];
+    const ids = new Set([...smartSelectedHighResNodeIds, ...selectedNodeIds()]);
+    return smartNodeElementsByIds(ids);
+}
+function syncSmartSelectedImageResolution(root=null){
     const selectedImages = [];
-    root.querySelectorAll?.('.image-node img[data-preview-src][data-original-src]').forEach(img => {
-        if(img.dataset.previewKind === 'video') return;
-        const nodeEl = img.closest('.image-node');
-        const selectedNode = Boolean(nodeEl?.dataset?.id && isNodeSelected(nodeEl.dataset.id));
-        const preview = img.dataset.previewSrc || '';
-        const original = img.dataset.originalSrc || '';
-        if(!selectedNode){
-            delete img.dataset.selectedHighResTarget;
+    smartNodeElementsForHighResSync(root).forEach(scope => {
+        const nodeEl = scope?.classList?.contains('image-node') ? scope : scope?.closest?.('.image-node');
+        const nodeId = nodeEl?.dataset?.id || '';
+        const selectedNode = Boolean(nodeId && isNodeSelected(nodeId));
+        scope.querySelectorAll?.('img[data-preview-src][data-original-src]').forEach(img => {
+            if(img.dataset.previewKind === 'video') return;
+            const preview = img.dataset.previewSrc || '';
+            const original = img.dataset.originalSrc || '';
+            if(!selectedNode){
+                delete img.dataset.selectedHighResTarget;
+                if(preview && img.getAttribute('src') !== preview) img.src = preview;
+                return;
+            }
+            const target = displayMediaUrl({url:smartOriginalMediaUrl(original)});
+            if(!target) return;
+            img.dataset.selectedHighResTarget = target;
+            if(smartSelectedHighResLoaded.has(target)){
+                if(img.getAttribute('src') !== target) img.src = target;
+                return;
+            }
             if(preview && img.getAttribute('src') !== preview) img.src = preview;
-            return;
-        }
-        const target = displayMediaUrl({url:smartOriginalMediaUrl(original)});
-        if(!target) return;
-        img.dataset.selectedHighResTarget = target;
-        if(smartSelectedHighResLoaded.has(target)){
-            if(img.getAttribute('src') !== target) img.src = target;
-            return;
-        }
-        if(preview && img.getAttribute('src') !== preview) img.src = preview;
-        selectedImages.push({img, target});
+            selectedImages.push({img, target});
+        });
     });
     if(smartSelectedHighResTimer) clearTimeout(smartSelectedHighResTimer);
     const seq = ++smartSelectedHighResSeq;
+    smartSelectedHighResNodeIds = new Set(selectedNodeIds());
     if(!selectedImages.length || smartImageEditorIsOpen()) return;
     smartSelectedHighResTimer = setTimeout(async () => {
         smartSelectedHighResTimer = 0;
@@ -663,7 +684,7 @@ function isGptImageAutoSizeModel(model){
         || compact.endsWith('gptimage2');
 }
 function defaultSmartApiResolution(model){
-    return isGptImageAutoSizeModel(model) ? 'auto' : '1k';
+    return isGptImageAutoSizeModel(model) ? '4k' : '1k';
 }
 function mediaItemForStorage(item){
     if(!item || typeof item !== 'object') return item;
@@ -736,16 +757,28 @@ function smartWorkflowFilename(ext='json'){
     const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '');
     return `${safe}-workflow-${stamp}.${ext}`;
 }
+function clearSmartNodeTransientRunState(node, options={}){
+    if(!node) return node;
+    node.running = false;
+    node.pending = 0;
+    node.queued = false;
+    delete node.jimengPending;
+    delete node.pendingTasks;
+    delete node._runMetaTargetId;
+    if(options.clearRunHistory){
+        delete node.runStartedAt;
+        delete node.runFinishedAt;
+        delete node.runElapsedMs;
+        delete node.runTimerHidden;
+    }
+    return node;
+}
 function serializableSmartNode(node){
     const base = JSON.parse(JSON.stringify(node || {}));
     const copy = normalizeLegacySmartNode(base) || {};
     if(Array.isArray(copy.images)) copy.images = copy.images.map(img => mediaItemForStorage(stripImageGenerationMeta(img))).filter(Boolean);
     if(copy.runSettings) copy.runSettings = settingsForStorage(copy.runSettings);
-    copy.running = false;
-    copy.pending = 0;
-    copy.queued = false;
-    copy.jimengPending = null;
-    delete copy.pendingTasks;
+    clearSmartNodeTransientRunState(copy);
     delete copy._dom;
     return copy;
 }
@@ -1211,18 +1244,27 @@ function clearImageClickTimer(){
         imageClickTimer = null;
     }
 }
+let smartSelectionUiNodeIds = new Set();
+let smartSelectionUiImage = {nodeId:'', index:-1};
 function syncSelectionUi(){
     const ids = selectedNodeIds();
+    const nextIds = new Set(ids);
+    const touchedIds = new Set([...smartSelectionUiNodeIds, ...nextIds]);
+    if(smartSelectionUiImage.nodeId) touchedIds.add(smartSelectionUiImage.nodeId);
+    if(selectedImage.nodeId) touchedIds.add(selectedImage.nodeId);
     world.classList.toggle('smart-multi-selected', ids.length > 1);
     smartArrangeBtn?.classList.toggle('visible', ids.length > 0);
-    world.querySelectorAll('.image-node').forEach(el => {
+    smartNodeElementsByIds(touchedIds).forEach(el => {
         const id = el.dataset.id || '';
         el.classList.toggle('selected', isNodeSelected(id));
         el.querySelectorAll('.thumb-item,.image-wrap').forEach(item => {
-            const index = Number(item.dataset.imageIndex || 0);
-            item.classList.toggle('image-selected', selectedImage.nodeId === id && selectedImage.index === index);
+            const targetNodeId = item.dataset.refNodeId || id;
+            const index = Number(item.dataset.refImageIndex ?? item.dataset.imageIndex ?? 0);
+            item.classList.toggle('image-selected', selectedImage.nodeId === targetNodeId && selectedImage.index === index);
         });
     });
+    smartSelectionUiNodeIds = nextIds;
+    smartSelectionUiImage = {nodeId:selectedImage.nodeId || '', index:Number(selectedImage.index ?? -1)};
     syncSmartSelectedImageResolution(world);
     syncRunButtonState();
     scheduleConnectionLayerRefresh();
@@ -2171,14 +2213,23 @@ function runningHubProvider(){
 }
 function runningHubEntries(kind){
     const provider = runningHubProvider();
+    if(kind === 'model'){
+        return (provider?.image_models || []).map(model => ({
+            id:String(model || '').trim(),
+            title:String(model || '').trim(),
+            enabled:true
+        })).filter(item => item.id);
+    }
     const key = kind === 'workflow' ? 'rh_workflows' : 'rh_apps';
     return Array.isArray(provider?.[key]) ? provider[key].filter(item => item?.enabled !== false && item?.hidden !== true) : [];
 }
 function runningHubEntryId(entry, kind){
+    if(kind === 'model') return String(entry?.id || entry?.model || entry?.title || '').trim();
     return String(kind === 'workflow' ? (entry?.workflowId || entry?.id || '') : (entry?.appId || entry?.webappId || entry?.id || '')).trim();
 }
 function runningHubEntryLabel(entry, kind){
     const id = runningHubEntryId(entry, kind);
+    if(kind === 'model') return entry?.title || entry?.name || id;
     return entry?.title || entry?.name || (kind === 'workflow' ? `Workflow ${id}` : `AI App ${id}`);
 }
 function runningHubEntryKey(kind, id){
@@ -2186,11 +2237,12 @@ function runningHubEntryKey(kind, id){
 }
 function parseRunningHubEntryKey(value){
     const text = String(value || '').trim();
-    const match = text.match(/^(app|workflow):(.+)$/);
+    const match = text.match(/^(app|workflow|model):(.+)$/);
     return match ? {kind:match[1], id:match[2].trim()} : null;
 }
 function runningHubAllEntries(){
     return [
+        ...runningHubEntries('model').map(entry => ({kind:'model', id:runningHubEntryId(entry, 'model'), entry})).filter(x => x.id),
         ...runningHubEntries('app').map(entry => ({kind:'app', id:runningHubEntryId(entry, 'app'), entry})).filter(x => x.id),
         ...runningHubEntries('workflow').map(entry => ({kind:'workflow', id:runningHubEntryId(entry, 'workflow'), entry})).filter(x => x.id)
     ];
@@ -2216,6 +2268,14 @@ function rhWorkflowJsonFromSources(...sources){
 function rhCurrentKind(sourceSettings=settings){
     return selectedRunningHubRef(sourceSettings)?.kind || 'app';
 }
+function runningHubSelectedModel(sourceSettings=settings){
+    const ref = selectedRunningHubRef(sourceSettings);
+    return ref?.kind === 'model' ? ref.id : '';
+}
+function runningHubModelApiSettings(sourceSettings=settings){
+    const model = runningHubSelectedModel(sourceSettings);
+    return {...(sourceSettings || settings), engine:'api', apiKind:'image', provider_id:'runninghub', model};
+}
 function rhUsableFields(fields){
     const list = Array.isArray(fields) ? fields : [];
     if(!list.length) return [];
@@ -2234,6 +2294,7 @@ function rhActiveFields(sourceSettings=settings){
 }
 function runningHubRunNeedsPrompt(sourceSettings=settings){
     if((sourceSettings || settings).engine !== 'runninghub') return true;
+    if(runningHubSelectedModel(sourceSettings)) return true;
     const fields = rhActiveFields(sourceSettings);
     const promptFields = fields.filter(field => rhFieldRole(field) === 'prompt');
     if(!promptFields.length) return false;
@@ -2326,7 +2387,7 @@ function syncJimengModelPillForRefs(){
     if(mode === _jimengLastEditMode) return;
     _jimengLastEditMode = mode;
     _jimengModelRefreshing = true;
-    try { renderDynamicParams(); } finally { _jimengModelRefreshing = false; }
+    try { scheduleDynamicParamsRefresh(80); } finally { _jimengModelRefreshing = false; }
 }
 // 即梦各视频指令支持的模型集合不同，按当前参考素材推断指令并过滤模型下拉。
 const JIMENG_SEEDANCE_VIDEO_MODELS = ['seedance2.0_vip', 'seedance2.0fast_vip', 'seedance2.0', 'seedance2.0fast'];
@@ -2363,7 +2424,7 @@ function syncJimengVideoModelPillForRefs(){
     if(command === _jimengLastVideoCommand) return;
     _jimengLastVideoCommand = command;
     _jimengModelRefreshing = true;
-    try { renderDynamicParams(); } finally { _jimengModelRefreshing = false; }
+    try { scheduleDynamicParamsRefresh(80); } finally { _jimengModelRefreshing = false; }
 }
 function sanitizeSmartApiSelection(target=settings){
     if(!target || typeof target !== 'object') return target;
@@ -2386,7 +2447,7 @@ function sanitizeSmartApiSelection(target=settings){
     }
     if((target.engine || 'api') === 'api' && (target.apiKind || 'image') !== 'video'){
         const allowAuto = isGptImageAutoSizeModel(target.model);
-        if(!target.resolution) target.resolution = allowAuto ? 'auto' : '1k';
+        if(!target.resolution) target.resolution = allowAuto ? defaultSmartApiResolution(target.model) : '1k';
         if(!allowAuto && target.resolution === 'auto') target.resolution = '1k';
     }
     if(target.videoProvider){
@@ -2553,7 +2614,7 @@ function normalizeApiSizeSettings(prefix=''){
     const ratioKey = prefix ? `${prefix}Ratio` : 'ratio';
     const resKey = prefix ? `${prefix}Resolution` : 'resolution';
     const allowAuto = !prefix && settings.engine === 'api' && settings.apiKind !== 'video' && isGptImageAutoSizeModel(settings.model);
-    if(!settings[resKey]) settings[resKey] = allowAuto ? 'auto' : '1k';
+    if(!settings[resKey]) settings[resKey] = allowAuto ? defaultSmartApiResolution(settings.model) : '1k';
     if(!allowAuto && settings[resKey] === 'auto') settings[resKey] = '1k';
     if(settings[resKey] === 'auto' && !settings[ratioKey]) settings[ratioKey] = 'square';
 }
@@ -2573,6 +2634,31 @@ function comfyParamValue(field){
     return field.default ?? (field.type === 'boolean' ? false : (field.type === 'number' || field.type === 'slider' ? 0 : ''));
 }
 function updateProviderModels(){ renderDynamicParams(); }
+let dynamicParamsRefreshTimer = 0;
+let dynamicParamsRefreshIdle = 0;
+let dynamicParamsRefreshSeq = 0;
+function scheduleDynamicParamsRefresh(delay=120){
+    if(dynamicParamsRefreshTimer){
+        clearTimeout(dynamicParamsRefreshTimer);
+        dynamicParamsRefreshTimer = 0;
+    }
+    if(dynamicParamsRefreshIdle && window.cancelIdleCallback){
+        window.cancelIdleCallback(dynamicParamsRefreshIdle);
+        dynamicParamsRefreshIdle = 0;
+    }
+    const seq = ++dynamicParamsRefreshSeq;
+    const run = () => {
+        dynamicParamsRefreshTimer = 0;
+        dynamicParamsRefreshIdle = 0;
+        if(seq !== dynamicParamsRefreshSeq) return;
+        renderDynamicParams();
+    };
+    if(window.requestIdleCallback){
+        dynamicParamsRefreshIdle = window.requestIdleCallback(run, {timeout:Math.max(180, Number(delay) + 260)});
+    } else {
+        dynamicParamsRefreshTimer = setTimeout(run, Math.max(0, Number(delay) || 0));
+    }
+}
 function controlTypeKey(el){
     return el ? Array.from(el.classList).find(c => c !== 'smart-control' && c.endsWith('-control')) || '' : '';
 }
@@ -2737,6 +2823,18 @@ function renderRunningHubParams(){
         dynamicParams.innerHTML = `<div class="muted-note">${escapeHtml(tr('smart.rhNeedConfig'))}</div>`;
         return;
     }
+    if(ref.kind === 'model'){
+        settings.provider_id = 'runninghub';
+        settings.model = ref.id;
+        normalizeApiSizeSettings('');
+        dynamicParams.innerHTML = `
+            ${renderRhConfigControl(ref)}
+            ${renderSizePickerControl('', true)}
+            ${renderQualityControl()}
+            ${renderCountVisualControl()}
+        `;
+        return;
+    }
     const mediaFields = fields.filter(f => ['image','video','audio'].includes(rhFieldRole(f))).length;
     const promptFields = fields.filter(f => rhFieldRole(f) === 'prompt').length;
     dynamicParams.innerHTML = `
@@ -2748,6 +2846,7 @@ function renderRunningHubParams(){
     `;
 }
 function renderRhConfigControl(ref){
+    const models = runningHubEntries('model');
     const apps = runningHubEntries('app');
     const workflows = runningHubEntries('workflow');
     const selected = ref ? runningHubEntryKey(ref.kind, ref.id) : '';
@@ -2756,7 +2855,8 @@ function renderRhConfigControl(ref){
         ${entries.map(entry => {
             const id = runningHubEntryId(entry, kind);
             const key = runningHubEntryKey(kind, id);
-            return `<button type="button" class="direct-option rh-entry-option ${key === selected ? 'active' : ''}" data-smart-param="rhConfigKey" data-smart-value="${escapeHtml(key)}"><i data-lucide="${kind === 'workflow' ? 'workflow' : 'sparkles'}"></i><span>${escapeHtml(runningHubEntryLabel(entry, kind))}</span></button>`;
+            const icon = kind === 'workflow' ? 'workflow' : kind === 'model' ? 'box' : 'sparkles';
+            return `<button type="button" class="direct-option rh-entry-option ${key === selected ? 'active' : ''}" data-smart-param="rhConfigKey" data-smart-value="${escapeHtml(key)}"><i data-lucide="${icon}"></i><span>${escapeHtml(runningHubEntryLabel(entry, kind))}</span></button>`;
         }).join('')}
     ` : '';
     return `<div class="smart-control rh-config-control">
@@ -2764,7 +2864,7 @@ function renderRhConfigControl(ref){
         <div class="smart-popover compact-popover rh-picker-popover">
             <div class="smart-popover-title">${escapeHtml(tr('smart.rhConfig'))}</div>
             <div class="model-list rh-config-list">
-                ${groupHtml('app', apps, 'AI 应用')}${groupHtml('workflow', workflows, '工作流') || ''}
+                ${groupHtml('model', models, '模型 API')}${groupHtml('app', apps, 'AI 应用')}${groupHtml('workflow', workflows, '工作流') || ''}
             </div>
         </div>
     </div>`;
@@ -3084,10 +3184,13 @@ function sizePickerLabel(prefix=''){
 function renderSizePickerControl(prefix='', includeSource=false){
     const ratioKey = prefix ? `${prefix}Ratio` : 'ratio';
     const resKey = prefix ? `${prefix}Resolution` : 'resolution';
+    const customRatioKey = prefix ? `${prefix}CustomRatio` : 'customRatio';
+    if(settings[ratioKey] === 'source') applySourceRatioToSettings(prefix);
     const scope = sizePickerScope(prefix);
     const options = (!prefix && settings.engine === 'api') ? ['auto','1k','2k','4k'] : ['1k','2k','4k'];
     const currentRes = settings[resKey] || ((!prefix && settings.engine === 'api') ? defaultSmartApiResolution(settings.model) : '1k');
     const currentRatio = settings[ratioKey] || 'square';
+    const currentCustomRatio = settings[customRatioKey] || (currentRatio === 'source' ? sourceImageRatioLabel(prefix) : '');
     const allowAuto = !prefix && settings.engine === 'api' && settings.apiKind !== 'video' && isGptImageAutoSizeModel(settings.model);
     const ratios = [
         ['square','1:1','正方形'], ['portrait','2:3','竖图'], ['landscape','3:2','横图'], ['portrait43','3:4','竖图'], ['landscape43','4:3','横图'],
@@ -3113,7 +3216,7 @@ function renderSizePickerControl(prefix='', includeSource=false){
                     ${ratios.map(([value, label, sub]) => `<button type="button" class="size-picker-option ${value === currentRatio ? 'active' : ''}" data-smart-param="${ratioKey}" data-smart-value="${escapeHtml(value)}"><span>${escapeHtml(label)}</span><small>${escapeHtml(sub)}</small></button>`).join('')}
                 </div>
                 <div class="size-picker-list">
-                    ${options.filter(v => v !== 'auto').map(value => `<button type="button" class="size-picker-option ${value === currentRes ? 'active' : ''}" data-smart-param="${resKey}" data-smart-value="${value}"><span>${value.toUpperCase()}</span><small>${escapeHtml(apiImageSize(currentRatio === 'source' ? 'square' : currentRatio, value, settings[prefix ? `${prefix}CustomRatio` : 'customRatio'] || '', '') || '')}</small></button>`).join('')}
+                    ${options.filter(v => v !== 'auto').map(value => `<button type="button" class="size-picker-option ${value === currentRes ? 'active' : ''}" data-smart-param="${resKey}" data-smart-value="${value}"><span>${value.toUpperCase()}</span><small>${escapeHtml(apiImageSize(currentRatio, value, currentCustomRatio, '') || '')}</small></button>`).join('')}
                 </div>
             </div>` : ''}
             ${scope === 'custom' ? `<div class="size-picker-pane size-picker-custom">
@@ -5830,13 +5933,8 @@ function cloneSmartNode(node, dx=0, dy=0){
     );
     copy.x = (Number(node.x) || 0) + dx;
     copy.y = (Number(node.y) || 0) + dy;
-    copy.running = false;
-    copy.pending = 0;
+    clearSmartNodeTransientRunState(copy, {clearRunHistory:true});
     if(copy.type === 'smart-group') copy.title = copy.title || '智能分组';
-    delete copy.runStartedAt;
-    delete copy.runFinishedAt;
-    delete copy.runElapsedMs;
-    delete copy.runTimerHidden;
     return copy;
 }
 function copySelectedNodes(){
@@ -5950,7 +6048,7 @@ function duplicateForAltDrag(node, preserveConnections=false){
     if(preserveConnections){
         const idSet = new Set(sourceNodes.map(n => n.id));
         const newConnections = (canvas.connections || [])
-            .filter(conn => idSet.has(conn.from) || idSet.has(conn.to))
+            .filter(conn => idSet.has(conn.to))
             .map(conn => ({...conn, from:idMap.get(conn.from) || conn.from, to:idMap.get(conn.to) || conn.to}))
             .filter(conn => conn.from && conn.to && conn.from !== conn.to);
         const nextConnections = [...(canvas.connections || [])];
@@ -6046,7 +6144,7 @@ function renderConnections(){
         const color = isCascade ? '#16a34a' : isHistory ? 'rgba(100,116,139,0.46)' : kind === 'input' ? 'rgba(100,116,139,0.62)' : 'rgba(148,163,184,0.62)';
         const opacity = isPendingLine ? '.82' : '1';
         const width = kind === 'input' ? '1.9' : '1.6';
-        return `<path class="${cls}" d="${curve}" stroke="${color}" stroke-width="${width}" fill="none" opacity="${opacity}"></path><path class="conn-hit" data-conn-index="${dataIndex}" d="${curve}" stroke="transparent" stroke-width="14" fill="none"></path><circle cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle><g class="conn-cut" data-conn-index="${dataIndex}" transform="translate(${mx} ${my})"><circle r="8" fill="var(--card)" stroke="${color}" stroke-width="1.4"></circle><path d="M-3 -3 L3 3 M3 -3 L-3 3" stroke="${color}" stroke-width="1.5" stroke-linecap="round"></path></g>`;
+        return `<path class="${cls} conn-line" data-conn-index="${dataIndex}" d="${curve}" stroke="${color}" stroke-width="${width}" fill="none" opacity="${opacity}"></path><path class="conn-hit" data-conn-index="${dataIndex}" d="${curve}" stroke="transparent" stroke-width="14" fill="none"></path><circle class="conn-end" data-conn-index="${dataIndex}" cx="${tx}" cy="${ty}" r="3.5" fill="${color}" opacity=".66"></circle><g class="conn-cut" data-conn-index="${dataIndex}" transform="translate(${mx} ${my})"><circle r="8" fill="var(--card)" stroke="${color}" stroke-width="1.4"></circle><path d="M-3 -3 L3 3 M3 -3 L-3 3" stroke="${color}" stroke-width="1.5" stroke-linecap="round"></path></g>`;
     }).join('');
     return `<svg class="connection-layer ${reduceMotion ? 'conn-reduce-motion' : ''}" width="6000" height="4000" viewBox="0 0 6000 4000" xmlns="http://www.w3.org/2000/svg">${paths}</svg>`;
 }
@@ -8159,7 +8257,7 @@ function bindNodeEvents(){
                 selectedImage = {nodeId:target.targetNodeId, index:target.imageIndex};
                     if(smartCascadeAnyRunning()) smartCascadeSilentSelection = false;
                     syncSelectionUi();
-                    updateComposer();
+                    scheduleComposerUpdate(180);
                 }, 220);
             });
         item.addEventListener('dblclick', e => {
@@ -8414,6 +8512,96 @@ function disconnectConnections(spec){
     });
     render();
     scheduleSave();
+}
+function connectionIndexSpecFromPoint(clientX, clientY){
+    const el = document.elementFromPoint(clientX, clientY);
+    const connEl = el?.closest?.('[data-conn-index]');
+    return connEl?.dataset?.connIndex || '';
+}
+function eraseConnectionsAtClientPoint(clientX, clientY){
+    if(!connectionEraseState || !canvas || !Array.isArray(canvas.connections)) return false;
+    const spec = connectionIndexSpecFromPoint(clientX, clientY);
+    if(!spec) return false;
+    const indices = String(spec).split(',')
+        .map(v => Number(v))
+        .filter(n => Number.isInteger(n) && n >= 0 && n < canvas.connections.length && !connectionEraseState.indices.has(n));
+    if(!indices.length) return false;
+    indices.forEach(index => connectionEraseState.indices.add(index));
+    connectionEraseState.started = true;
+    connectionEraseState.count = connectionEraseState.indices.size;
+    world.querySelectorAll('[data-conn-index]').forEach(el => {
+        const hasHit = String(el.dataset.connIndex || '').split(',').some(v => connectionEraseState.indices.has(Number(v)));
+        if(hasHit) el.classList.add('conn-erasing-mark');
+    });
+    return true;
+}
+function finishConnectionErase(){
+    if(!connectionEraseState || !canvas || !Array.isArray(canvas.connections)) return false;
+    const set = new Set(connectionEraseState.indices || []);
+    if(!set.size) return false;
+    const removed = canvas.connections.filter((_, i) => set.has(i));
+    if(!removed.length) return false;
+    pushUndo();
+    removed.forEach(conn => {
+        const toNode = nodes.find(n => n.id === conn.to);
+        if(toNode && Array.isArray(toNode.inputNodeIds)){
+            toNode.inputNodeIds = toNode.inputNodeIds.filter(id => id !== conn.from);
+        }
+        if(toNode && ['input','flow'].includes(conn.kind || 'flow')) clearDetachedRunInputRefs(toNode);
+        if((conn.kind || 'flow') === 'history'){
+            const group = nodes.find(n => n.id === conn.to && isHistoryGroupNode(n) && n.historyFor === conn.from);
+            demoteHistoryGroupNode(group);
+        }
+    });
+    canvas.connections = canvas.connections.filter((_, i) => !set.has(i));
+    render();
+    return true;
+}
+function eraseConnectionsAtPoint(event){
+    return eraseConnectionsAtClientPoint(event.clientX, event.clientY);
+}
+function eraseConnectionsAlongPointer(event){
+    if(!connectionEraseState) return false;
+    const lastX = Number.isFinite(connectionEraseState.lastX) ? connectionEraseState.lastX : event.clientX;
+    const lastY = Number.isFinite(connectionEraseState.lastY) ? connectionEraseState.lastY : event.clientY;
+    const dx = event.clientX - lastX;
+    const dy = event.clientY - lastY;
+    const steps = Math.max(1, Math.min(12, Math.ceil(Math.hypot(dx, dy) / 8)));
+    let changed = false;
+    for(let i = 1; i <= steps; i++){
+        const t = i / steps;
+        changed = eraseConnectionsAtClientPoint(lastX + dx * t, lastY + dy * t) || changed;
+    }
+    connectionEraseState.lastX = event.clientX;
+    connectionEraseState.lastY = event.clientY;
+    return changed;
+}
+function ensureConnectionEraseTrail(){
+    let svg = shell.querySelector(':scope > svg.connection-erase-trail');
+    if(svg) return svg;
+    svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'connection-erase-trail');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.innerHTML = '<path class="connection-erase-trail-glow" fill="none"></path><path class="connection-erase-trail-line" fill="none"></path>';
+    shell.appendChild(svg);
+    return svg;
+}
+function updateConnectionEraseTrail(event){
+    if(!connectionEraseState) return;
+    const p = shellPoint(event);
+    connectionEraseState.trail = [...(connectionEraseState.trail || []), p].slice(-80);
+    const points = connectionEraseState.trail;
+    const svg = ensureConnectionEraseTrail();
+    const rect = shell.getBoundingClientRect();
+    svg.setAttribute('viewBox', `0 0 ${Math.max(1, rect.width)} ${Math.max(1, rect.height)}`);
+    const d = points.map((pt, index) => `${index ? 'L' : 'M'}${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`).join(' ');
+    svg.querySelectorAll('path').forEach(path => path.setAttribute('d', d));
+}
+function clearConnectionEraseTrail(){
+    const svg = shell.querySelector(':scope > svg.connection-erase-trail');
+    if(!svg) return;
+    svg.classList.add('fading');
+    setTimeout(() => svg.remove(), 180);
 }
 function connectionMidpoint(conn){
     const fromNode = nodes.find(n => n.id === conn?.from);
@@ -11182,7 +11370,26 @@ function positionComposerForNode(node){
     composer.style.left = `${rect.x + rect.width / 2 - cardW / 2}px`;
     composer.style.top = `${rect.y + rect.height + gap}px`;
 }
+let composerUpdateTimer = 0;
+let composerUpdateSeq = 0;
+function scheduleComposerUpdate(delay=120){
+    if(composerUpdateTimer){
+        clearTimeout(composerUpdateTimer);
+        composerUpdateTimer = 0;
+    }
+    const seq = ++composerUpdateSeq;
+    composerUpdateTimer = setTimeout(() => {
+        composerUpdateTimer = 0;
+        if(seq !== composerUpdateSeq) return;
+        updateComposer();
+    }, Math.max(0, Number(delay) || 0));
+}
 function updateComposer(){
+    if(composerUpdateTimer){
+        clearTimeout(composerUpdateTimer);
+        composerUpdateTimer = 0;
+    }
+    composerUpdateSeq++;
     const node = selectedNode();
     syncRunButtonState(node);
     if(smartCascadeSilentSelection && !activeComposerSubject){
@@ -11223,7 +11430,7 @@ function updateComposer(){
     renderInputThumbsRow(node);
     renderInputPromptPreview(node);
     syncCascadeRunButton(node);
-    updateProviderModels();
+    scheduleDynamicParamsRefresh(140);
 }
 function renderInputPromptPreview(node){
     if(!inputPromptPreview) return;
@@ -11815,7 +12022,7 @@ async function handleSmartImageDropPayload(payload, targetId='', opts={}){
 }
 function sizeForRun(sourceSettings=settings){
     const fallbackResolution = sourceSettings.engine === 'api' && isGptImageAutoSizeModel(sourceSettings.model)
-        ? 'auto'
+        ? defaultSmartApiResolution(sourceSettings.model)
         : '1k';
     return apiImageSize(sourceSettings.ratio || 'square', sourceSettings.resolution || fallbackResolution, sourceSettings.customRatio || '', sourceSettings.customSize || '') || '1024x1024';
 }
@@ -13655,6 +13862,17 @@ function buildPromptRequestForNode(node, defaultImages, ctx=smartLoopContext){
 async function generateUrlsForCurrentSettings(node, prompt, refs, runSettings=settings){
     const activeSettings = runSettings || settings;
     if(activeSettings.engine === 'comfy') return generateComfyUrlsWithSettings(activeSettings, prompt, refs);
+    if(activeSettings.engine === 'runninghub' && runningHubSelectedModel(activeSettings)){
+        const taskResult = await runApiGeneration(prompt, refs, runningHubModelApiSettings(activeSettings));
+        const taskIds = Array.isArray(taskResult?.taskIds) ? taskResult.taskIds : [];
+        if(taskIds.length){
+            const settled = await Promise.all(taskIds.map(taskId => pollSmartCanvasTask(taskId)));
+            const urls = settled.flatMap(result => resultMediaUrls(result?.image_items?.length ? result.image_items : (result?.images?.length ? result.images : result))).filter(Boolean);
+            return {urls, kind:mediaKindForUrls(urls, 'image')};
+        }
+        const urls = resultMediaUrls(taskResult);
+        return {urls, kind:mediaKindForUrls(urls, 'image')};
+    }
     if(isApiLikeEngine(activeSettings.engine) && activeSettings.apiKind === 'video'){
         return {urls:await runApiVideoGeneration(prompt, refs, activeSettings), kind:'video'};
     }
@@ -14333,12 +14551,15 @@ async function runGeneration(){
             scheduleSave();
             return;
         }
-        const outImages = settings.engine === 'runninghub'
-            ? await runRunningHubGeneration(prompt, refs)
-            : settings.engine === 'modelscope'
+        const rhModelMode = settings.engine === 'runninghub' && Boolean(runningHubSelectedModel(settings));
+        const outImages = rhModelMode
+            ? await runApiGeneration(prompt, refs, runningHubModelApiSettings(settings))
+            : settings.engine === 'runninghub'
+                ? await runRunningHubGeneration(prompt, refs)
+                : settings.engine === 'modelscope'
                 ? await runModelscopeGeneration(prompt, refs)
                 : await runApiGeneration(prompt, refs);
-        if(isApiLikeEngine(settings.engine)){
+        if(isApiLikeEngine(settings.engine) || rhModelMode){
             const taskIds = Array.isArray(outImages?.taskIds) ? outImages.taskIds : [];
             if(!taskIds.length) throw new Error(tr('smart.errRunFailed'));
             pendingNode.pendingTasks = taskIds.map(taskId => ({taskId, kind:'image', providerId:outImages.providerId, model:outImages.model}));
@@ -14491,9 +14712,10 @@ async function runRunningHubGeneration(prompt, refs, runSettings=settings){
     });
     const taskId = submit.taskId;
     if(!taskId) throw new Error(tr('smart.rhNoTaskId'));
+    const useWallet = runSettings.rhPayment === 'wallet';
     for(let i = 0; i < 720; i++){
         await sleep(2500);
-        const data = await fetch(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}`).then(async r => {
+        const data = await fetch(`/api/runninghub/query?taskId=${encodeURIComponent(taskId)}&useWallet=${useWallet ? '1' : '0'}`).then(async r => {
             const json = await r.json();
             if(!r.ok || json.success === false) throw new Error(json.detail || json.error || tr('smart.rhFailed'));
             return json.data || json;
@@ -15350,6 +15572,15 @@ shell.onmousedown = e => {
     if(zoomPreviewState && e.button === 0 && !e.target.closest('.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.image-edit-modal,.create-menu,.smart-minimap')) return;
     if(e.target.closest('.image-node,.composer,.smart-back,.asset-panel,.asset-toggle,.smart-log-toggle,.smart-shortcut-toggle,.smart-workflow-toggle,.log-modal,.shortcut-modal,.create-menu,.smart-minimap')) return;
     closeCreateMenu();
+    if(e.button === 0 && e.shiftKey){
+        e.preventDefault();
+        didPan = false;
+        connectionEraseState = {started:false, count:0, indices:new Set(), lastX:e.clientX, lastY:e.clientY, trail:[]};
+        shell.classList.add('connection-erasing');
+        updateConnectionEraseTrail(e);
+        eraseConnectionsAtPoint(e);
+        return;
+    }
     if(e.button === 0 && isRKeyDown){
         e.preventDefault();
         didPan = false;
@@ -15424,6 +15655,12 @@ window.onmousemove = e => {
     if(smartMinimapDrag){
         e.preventDefault();
         centerViewportOnWorldPoint(minimapEventToWorld(e));
+        return;
+    }
+    if(connectionEraseState){
+        e.preventDefault();
+        updateConnectionEraseTrail(e);
+        eraseConnectionsAlongPointer(e);
         return;
     }
     if(portDragState){
@@ -15691,6 +15928,14 @@ window.onmousemove = e => {
 window.onmouseup = e => {
     document.body.classList.remove('smart-node-drag');
     document.body.classList.remove('smart-node-resize');
+    if(connectionEraseState){
+        const changed = finishConnectionErase();
+        connectionEraseState = null;
+        shell.classList.remove('connection-erasing');
+        clearConnectionEraseTrail();
+        if(changed) scheduleSave();
+        return;
+    }
     if(portDragState){
         const drag = portDragState;
         portDragState = null;

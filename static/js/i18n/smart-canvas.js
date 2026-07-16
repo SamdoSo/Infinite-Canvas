@@ -274,7 +274,7 @@
         "smart.shortcutCopy": { zh: "复制选中的节点", en: "Copy selected nodes" },
         "smart.shortcutPaste": { zh: "粘贴节点或剪贴板图片", en: "Paste nodes or clipboard images" },
         "smart.shortcutAltCopy": { zh: "按住并拖动复制节点", en: "Hold and drag to duplicate nodes" },
-        "smart.shortcutAltShiftCopy": { zh: "复制节点并保留连线", en: "Duplicate nodes and keep connections" },
+        "smart.shortcutAltShiftCopy": { zh: "复制节点并保留输入连线", en: "Duplicate nodes and keep input connections" },
         "smart.shortcutAssets": { zh: "打开/关闭资源库", en: "Open/close the asset library" },
         "smart.shortcutOverview": { zh: "缩小画布视图", en: "Zoom out to canvas overview" },
         "smart.shortcutCreateMenu": { zh: "打开快捷菜单", en: "Open the quick create menu" },
