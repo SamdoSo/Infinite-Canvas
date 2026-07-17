@@ -303,6 +303,7 @@ let settings = {
     apiKind:'image',
     provider_id:'',
     model:'',
+    size:'auto',
     ratio:'square',
     resolution:'auto',
     customRatio:'',
@@ -664,6 +665,14 @@ function isGptImageAutoSizeModel(model){
 }
 function defaultSmartApiResolution(model){
     return isGptImageAutoSizeModel(model) ? 'auto' : '1k';
+}
+/**
+ * 返回 API 图像默认尺寸字符串：GPT-Image-2 模型用 auto，其他模型默认 1024x1024。
+ * @param {string} model 模型标识
+ * @returns {string} 默认尺寸（"auto" 或 "WxH"）
+ */
+function defaultSmartApiSize(model){
+    return isGptImageAutoSizeModel(model) ? 'auto' : '1024x1024';
 }
 function mediaItemForStorage(item){
     if(!item || typeof item !== 'object') return item;
@@ -2530,7 +2539,39 @@ function parseRatioValue(value){
     const h = Number(parts[1]);
     return w > 0 && h > 0 ? w / h : 0;
 }
+/**
+ * 校验并归一化一个 WxH 尺寸字符串；合法则返回原始字符串，否则返回空串。
+ * "auto" 视为合法；W/H 必须为 64-8192 之间的整数。
+ * @param {string} value 输入值
+ * @returns {string} 合法的 size 字符串或空串
+ */
+function normalizeSizeString(value){
+    const raw = String(value || '').trim();
+    if(!raw) return '';
+    if(raw.toLowerCase() === 'auto') return 'auto';
+    const m = raw.match(/^(\d+)\s*[xX*]\s*(\d+)$/);
+    if(!m) return '';
+    const w = Number(m[1]);
+    const h = Number(m[2]);
+    if(!Number.isFinite(w) || !Number.isFinite(h)) return '';
+    if(w < 64 || h < 64 || w > 8192 || h > 8192) return '';
+    return `${w}x${h}`;
+}
+/**
+ * API 图像尺寸字符串（保留旧签名兼容 ModelScope/外扩等调用）。
+ * 新逻辑优先读取 settings.size；若传入 ratio/resolution 形式（ModelScope 仍使用），走旧的 SIZE_MAP 映射。
+ * @param {string} ratioValue 比例键或 size 字符串
+ * @param {string} resolutionValue 分辨率键
+ * @param {string} customRatioValue 自定义比例（W:H）
+ * @param {string} customSizeValue 自定义尺寸（WxH）
+ * @returns {string} "auto" 或 "WxH" 格式
+ */
 function apiImageSize(ratioValue, resolutionValue, customRatioValue='', customSizeValue=''){
+    // 如果 ratioValue 看起来是 WxH 或 auto，直接返回（新调用方式）
+    if(typeof ratioValue === 'string'){
+        const normalized = normalizeSizeString(ratioValue);
+        if(normalized) return normalized;
+    }
     if(resolutionValue === 'auto') return 'auto';
     if(resolutionValue === 'custom') return String(customSizeValue || '').trim();
     const resolutionKey = resolutionValue || '1k';
@@ -2549,13 +2590,31 @@ function apiImageSize(ratioValue, resolutionValue, customRatioValue='', customSi
     const ratioKey = ratioValue && SIZE_MAP[ratioValue] ? ratioValue : 'square';
     return SIZE_MAP[ratioKey]?.[resolutionKey] || SIZE_MAP.square[resolutionKey] || SIZE_MAP.square['1k'];
 }
+/**
+ * 归一化 API 图像 settings.size 字段。
+ * - 非 ModelScope 前缀（API/火山图像）使用 settings.size（WxH/auto）。
+ * - ModelScope 前缀（'ms'）沿用旧的 msRatio/msResolution 组合逻辑。
+ * @param {string} prefix '' 表示 API 图像；'ms' 表示 ModelScope
+ */
 function normalizeApiSizeSettings(prefix=''){
-    const ratioKey = prefix ? `${prefix}Ratio` : 'ratio';
-    const resKey = prefix ? `${prefix}Resolution` : 'resolution';
-    const allowAuto = !prefix && settings.engine === 'api' && settings.apiKind !== 'video' && isGptImageAutoSizeModel(settings.model);
-    if(!settings[resKey]) settings[resKey] = allowAuto ? 'auto' : '1k';
-    if(!allowAuto && settings[resKey] === 'auto') settings[resKey] = '1k';
-    if(settings[resKey] === 'auto' && !settings[ratioKey]) settings[ratioKey] = 'square';
+    if(prefix === 'ms'){
+        // ModelScope 保持旧逻辑
+        const ratioKey = 'msRatio';
+        const resKey = 'msResolution';
+        if(!settings[resKey]) settings[resKey] = '1k';
+        if(settings[resKey] === 'auto') settings[resKey] = '1k';
+        if(!settings[ratioKey]) settings[ratioKey] = 'square';
+        return;
+    }
+    const allowAuto = settings.engine === 'api' && settings.apiKind !== 'video' && isGptImageAutoSizeModel(settings.model);
+    const current = normalizeSizeString(settings.size);
+    if(!current){
+        settings.size = allowAuto ? 'auto' : '1024x1024';
+    } else if(current === 'auto' && !allowAuto){
+        settings.size = '1024x1024';
+    } else {
+        settings.size = current;
+    }
 }
 async function ensureComfyWorkflow(name){
     if(!name) return null;

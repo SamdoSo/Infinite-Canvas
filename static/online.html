@@ -43,17 +43,18 @@
         .control-label { display:flex; align-items:center; gap:6px; color:#94a3b8; font-size:10px; font-weight:600; letter-spacing:.04em; }
         .size-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px; align-items:start; }
         .size-field { min-width:0; display:flex; flex-direction:column; gap:6px; }
-        .size-select,.size-custom { width:100%; min-width:0; max-width:100%; height:34px; border:1px solid #edf2f7; border-radius:14px; background:#f8fafc; color:#111827; outline:none; padding:0 10px; font-size:11px; font-weight:700; }
-        .size-select { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .size-select { width:100%; min-width:0; max-width:100%; height:34px; border:1px solid #edf2f7; border-radius:14px; background:#f8fafc; color:#111827; outline:none; padding:0 10px; font-size:11px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .size-select:disabled { opacity:.55; cursor:not-allowed; }
-        .size-custom { display:none; background:#fff; }
-        .size-field.custom .size-custom { display:block; }
-        .size-pair { display:none; grid-template-columns:1fr 1fr; gap:6px; }
-        .size-field.custom .size-pair { display:grid; }
-        .size-pair .size-custom { display:block; }
-        .size-pair.with-fit { grid-template-columns:1fr 1fr auto; align-items:center; }
-        .size-fit-btn { height:34px; border:1px solid #edf2f7; border-radius:14px; background:#fff; color:#111827; padding:0 10px; font-size:10px; font-weight:800; white-space:nowrap; }
+        .size-input-row { display:flex; gap:6px; align-items:center; }
+        .size-input { flex:1; min-width:0; height:34px; border:1px solid #edf2f7; border-radius:14px; background:#fff; color:#111827; outline:none; padding:0 12px; font-size:11px; font-weight:700; font-family:inherit; transition:all .2s var(--easing); }
+        .size-input:focus { border-color:#000; box-shadow:0 0 0 1px #000; }
+        .size-fit-btn { height:34px; border:1px solid #edf2f7; border-radius:14px; background:#fff; color:#111827; padding:0 12px; font-size:10px; font-weight:800; white-space:nowrap; cursor:pointer; transition:all .2s var(--easing); }
+        .size-fit-btn:hover:not(:disabled) { background:#111827; color:#fff; border-color:#111827; }
         .size-fit-btn:disabled { opacity:.45; cursor:not-allowed; }
+        .size-presets { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+        .size-preset-btn { height:28px; border:1px solid #edf2f7; border-radius:10px; background:#f8fafc; color:#64748b; padding:0 10px; font-size:10px; font-weight:700; cursor:pointer; transition:all .2s var(--easing); white-space:nowrap; }
+        .size-preset-btn:hover { border-color:#111827; color:#111827; }
+        .size-preset-btn.active { background:#111827; color:#fff; border-color:#111827; }
         .mode-badge { font-size:9px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; color:#0f172a; background:#eef2ff; border:1px solid #e0e7ff; padding:2px 8px; border-radius:999px; }
         .masonry-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:20px; }
         @media (min-width:768px){ .masonry-grid{ grid-template-columns:repeat(4,1fr); } }
@@ -171,37 +172,18 @@
                         <i data-lucide="ruler" class="w-3.5 h-3.5"></i>
                         <span data-i18n="online.size">Size</span>
                     </div>
-                    <div class="size-row">
-                        <label id="resolutionField" class="size-field">
-                            <select id="resolutionSelect" class="size-select" onchange="setResolution(this.value)">
-                                <option value="1k" selected>1K</option>
-                                <option value="2k">2K</option>
-                                <option value="4k">4K</option>
-                                <option value="custom" data-i18n="online.customSize">自定义尺寸</option>
-                            </select>
-                            <span class="size-pair with-fit">
-                                <input id="sizeCustomWidth" class="size-custom" type="number" min="64" step="64" placeholder="宽度" data-i18n-placeholder="online.width" oninput="setCustomSize()">
-                                <input id="sizeCustomHeight" class="size-custom" type="number" min="64" step="64" placeholder="高度" data-i18n-placeholder="online.height" oninput="setCustomSize()">
-                                <button id="fitImageSizeBtn" class="size-fit-btn" type="button" onclick="fitCustomSizeToImage(event)">适配图片</button>
-                            </span>
-                        </label>
-                        <label id="ratioField" class="size-field">
-                            <select id="ratioSelect" class="size-select" onchange="setRatio(this.value)">
-                                <option value="" data-i18n="online.emptyRatio">比例为空</option>
-                                <option value="square" selected data-i18n="online.square">1:1 方图</option>
-                                <option value="portrait" data-i18n="online.portrait">2:3 竖图</option>
-                                <option value="landscape" data-i18n="online.landscape">3:2 横图</option>
-                                <option value="portrait43">3:4 竖图</option>
-                                <option value="landscape43">4:3 横图</option>
-                                <option value="story" data-i18n="online.story">9:16 竖屏</option>
-                                <option value="wide" data-i18n="online.wide">16:9 宽屏</option>
-                                <option value="custom" data-i18n="online.customRatio">自定义比例</option>
-                            </select>
-                            <span class="size-pair">
-                                <input id="ratioCustomWidth" class="size-custom" type="number" min="1" step="1" placeholder="宽" data-i18n-placeholder="online.ratioWidth" oninput="setCustomRatio()">
-                                <input id="ratioCustomHeight" class="size-custom" type="number" min="1" step="1" placeholder="高" data-i18n-placeholder="online.ratioHeight" oninput="setCustomRatio()">
-                            </span>
-                        </label>
+                    <div>
+                        <div class="size-input-row">
+                            <input id="sizeInput" class="size-input" type="text" value="1024x1024" placeholder="1024x1024" title="WxH 格式，如 1024x1024，或 auto" data-i18n-placeholder="online.sizePlaceholder">
+                            <button id="fitImageSizeBtn" class="size-fit-btn" type="button" onclick="fitImageSize(event)" data-i18n="online.fitImage">适配图片</button>
+                        </div>
+                        <div id="sizePresets" class="size-presets">
+                            <button type="button" class="size-preset-btn" data-size="auto" data-i18n="online.sizeAuto">auto</button>
+                            <button type="button" class="size-preset-btn active" data-size="1024x1024">1024×1024</button>
+                            <button type="button" class="size-preset-btn" data-size="1536x1024">1536×1024</button>
+                            <button type="button" class="size-preset-btn" data-size="1024x1536">1024×1536</button>
+                            <button type="button" class="size-preset-btn" data-size="2048x2048">2048×2048</button>
+                        </div>
                     </div>
                 </div>
 
@@ -276,56 +258,17 @@
         let provider = 'comfly';
         let selectedModel = 'gpt-image-2';
         let apiProviders = [];
-        let ratio = 'square';
-        let resolution = '1k';
-        let customRatioWidth = '';
-        let customRatioHeight = '';
-        let customWidth = '';
-        let customHeight = '';
+        let imageSize = '1024x1024';
         let quality = 'auto';
         let outputCount = 1;
         let models = {gpt:'gpt-image-2', nano:'nano-banana-pro'};
         let allHistory = [], currentIndex = 0, currentResult = null, currentLightboxData = null, isLoading = false;
         const PAGE_SIZE = 24;
-        const SIZE_OPTIONS = {
-            square: [
-                ['1024x1024', '1k'],
-                ['2048x2048', '2k'],
-                ['3840x2160', '4k']
-            ],
-            portrait: [
-                ['1024x1536', '1k'],
-                ['1360x2048', '2k'],
-                ['2352x3520', '4k']
-            ],
-            portrait43: [
-                ['1008x1344', '1k'],
-                ['1536x2048', '2k'],
-                ['2448x3264', '4k']
-            ],
-            landscape43: [
-                ['1344x1008', '1k'],
-                ['2048x1536', '2k'],
-                ['3264x2448', '4k']
-            ],
-            landscape: [
-                ['1536x1024', '1k'],
-                ['2048x1360', '2k'],
-                ['3520x2352', '4k']
-            ],
-            story: [
-                ['720x1280', '1k'],
-                ['1152x2048', '2k'],
-                ['2160x3840', '4k']
-            ],
-            wide: [
-                ['1280x720', '1k'],
-                ['2048x1152', '2k'],
-                ['3840x2160', '4k']
-            ]
-        };
-        const RES_LONG_SIDE = { '1k': 1536, '2k': 2048, '4k': 3840 };
-        const RES_PIXEL_LIMIT = { '1k': 1572864, '2k': 4194304, '4k': 8294400 };
+        /** 判断是否为 GPT 图像模型（支持 auto 尺寸） */
+        function isGptImageModel(modelName){
+            const m = String(modelName || '').toLowerCase();
+            return m.includes('gpt-image') || m === 'auto';
+        }
 
         function uniqueModels(list){
             const seen = new Set();
@@ -425,6 +368,11 @@
             if(cf) cf.style.display = (proto === 'runninghub') ? 'none' : '';
             const cs = document.getElementById('countSelect');
             if(cs) cs.value = String(outputCount);
+            // GPT 图像模型支持 auto 尺寸：若当前模型是 gpt-image 系且当前尺寸为默认值，自动切换为 auto
+            if(proto !== 'runninghub' && isGptImageModel(selectedModel) && imageSize === '1024x1024'){
+                setSize('auto');
+            }
+            updateSizeUI();
         }
         function setQuality(next){ quality = next || 'auto'; }
         function setCount(next){ outputCount = Math.max(1, Math.min(4, parseInt(next, 10) || 1)); }
@@ -474,20 +422,6 @@
         }
         function escapeHtml(str){ return String(str || '').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])); }
 
-        function parseSizeValue(value){
-            const match = String(value || '').trim().match(/^(\d+)\s*[xX*]\s*(\d+)$/);
-            return match ? {width:match[1], height:match[2]} : null;
-        }
-        function customRatioValue(){
-            const w = Number(customRatioWidth);
-            const h = Number(customRatioHeight);
-            return w > 0 && h > 0 ? w / h : null;
-        }
-        function customSizeValue(){
-            const w = Number(customWidth);
-            const h = Number(customHeight);
-            return w > 0 && h > 0 ? `${Math.round(w)}x${Math.round(h)}` : '';
-        }
         function getImageDimensions(src){
             return new Promise((resolve, reject) => {
                 const img = new Image();
@@ -496,102 +430,71 @@
                 img.src = src;
             });
         }
+        /** 获取第一个已上传参考图的尺寸，无图返回 null */
         function firstReferenceDimension(){
             return [1,2,3].map(id => refDims[id]).find(dim => dim?.width && dim?.height) || null;
         }
 
-        function setRatio(next, preferredSize = ''){
-            ratio = next;
-            if (preferredSize) {
-                const match = SIZE_OPTIONS[next]?.find(([value]) => value === preferredSize);
-                if (match) resolution = match[1];
-            }
-            if(next !== 'custom') {
-                customRatioWidth = '';
-                customRatioHeight = '';
-            }
-            updateSizeUI();
+        /**
+         * 设置尺寸值，更新输入框与快捷按钮高亮状态。
+         * @param {string} value - WxH 格式字符串或 "auto"
+         */
+        function setSize(value){
+            const v = String(value || '').trim().toLowerCase().replace('×','x');
+            imageSize = v || '1024x1024';
+            const input = document.getElementById('sizeInput');
+            if(input) input.value = imageSize;
+            // 更新快捷按钮高亮
+            const btns = document.querySelectorAll('#sizePresets .size-preset-btn');
+            btns.forEach(btn => {
+                const preset = (btn.dataset.size || '').toLowerCase().replace('×','x');
+                btn.classList.toggle('active', preset === imageSize);
+            });
+            // 更新"适配图片"按钮状态
+            const fitBtn = document.getElementById('fitImageSizeBtn');
+            if(fitBtn) fitBtn.disabled = !firstReferenceDimension();
         }
 
-        function setCustomRatio(){
-            customRatioWidth = document.getElementById('ratioCustomWidth').value;
-            customRatioHeight = document.getElementById('ratioCustomHeight').value;
-            ratio = 'custom';
-            updateSizeUI();
-        }
-
-        function setCustomSize(){
-            customWidth = document.getElementById('sizeCustomWidth').value;
-            customHeight = document.getElementById('sizeCustomHeight').value;
-            resolution = 'custom';
-            ratio = '';
-            updateSizeUI();
-        }
-
-        function setResolution(next){
-            resolution = next;
-            if(next === 'custom'){
-                ratio = '';
-            } else {
-                customWidth = '';
-                customHeight = '';
-                if(ratio === '') ratio = 'square';
-            }
-            updateSizeUI();
-        }
-
+        /** 刷新尺寸 UI 状态（适配按钮可用状态、快捷按钮高亮） */
         function updateSizeUI(){
-            const ratioSelect = document.getElementById('ratioSelect');
-            const ratioField = document.getElementById('ratioField');
-            const ratioCustomWidthInput = document.getElementById('ratioCustomWidth');
-            const ratioCustomHeightInput = document.getElementById('ratioCustomHeight');
-            const resolutionSelect = document.getElementById('resolutionSelect');
-            const resolutionField = document.getElementById('resolutionField');
-            const sizeCustomWidthInput = document.getElementById('sizeCustomWidth');
-            const sizeCustomHeightInput = document.getElementById('sizeCustomHeight');
-            const fitImageSizeBtn = document.getElementById('fitImageSizeBtn');
-            ratioSelect.value = ratio;
-            ratioSelect.disabled = resolution === 'custom';
-            ratioField.classList.toggle('custom', ratio === 'custom');
-            ratioCustomWidthInput.value = customRatioWidth;
-            ratioCustomHeightInput.value = customRatioHeight;
-            resolutionSelect.value = resolution;
-            resolutionField.classList.toggle('custom', resolution === 'custom');
-            sizeCustomWidthInput.value = customWidth;
-            sizeCustomHeightInput.value = customHeight;
-            if(fitImageSizeBtn) fitImageSizeBtn.disabled = !firstReferenceDimension();
-            updateResolutionUI();
+            setSize(imageSize);
         }
 
-        function updateResolutionUI(){}
-        function fitCustomSizeToImage(event){
+        /**
+         * 校验并规范化尺寸值。
+         * @param {string} value - 待校验的尺寸字符串
+         * @returns {string} 合法的 WxH 或 "auto"，非法时返回 "1024x1024"
+         */
+        function validateSize(value){
+            const v = String(value || '').trim().toLowerCase().replace('×','x');
+            if(v === 'auto') return 'auto';
+            const match = v.match(/^(\d+)\s*[x*]\s*(\d+)$/);
+            if(match){
+                const w = parseInt(match[1], 10);
+                const h = parseInt(match[2], 10);
+                if(w >= 64 && h >= 64 && w <= 8192 && h <= 8192){
+                    return `${w}x${h}`;
+                }
+            }
+            return '1024x1024';
+        }
+
+        /** 获取当前有效的尺寸值 */
+        function currentSize(){
+            const input = document.getElementById('sizeInput');
+            const raw = input ? input.value : imageSize;
+            return validateSize(raw);
+        }
+
+        /**
+         * "适配图片"按钮回调：读取第一个参考图尺寸，填入输入框。
+         * @param {Event} event - 点击事件
+         */
+        function fitImageSize(event){
             if(event) event.preventDefault();
             const dim = firstReferenceDimension();
             if(!dim) return;
-            resolution = 'custom';
-            ratio = '';
-            customWidth = dim.width;
-            customHeight = dim.height;
-            updateSizeUI();
-        }
-
-        function currentSize(){
-            if(resolution === 'custom') return customSizeValue();
-            const options = SIZE_OPTIONS[ratio] || SIZE_OPTIONS.square;
-            if(ratio === 'custom'){
-                const parsed = customRatioValue();
-                const longSide = RES_LONG_SIDE[resolution] || 1024;
-                if(parsed){
-                    const pixelLimit = RES_PIXEL_LIMIT[resolution] || (longSide * longSide);
-                    const rawWidth = parsed >= 1 ? longSide : Math.min(longSide * parsed, Math.sqrt(pixelLimit * parsed));
-                    const rawHeight = parsed >= 1 ? Math.min(longSide / parsed, Math.sqrt(pixelLimit / parsed)) : longSide;
-                    const width = Math.floor(rawWidth / 16) * 16;
-                    const height = Math.floor(rawHeight / 16) * 16;
-                    return `${Math.max(64, width)}x${Math.max(64, height)}`;
-                }
-            }
-            const match = options.find(([, label]) => label === resolution) || SIZE_OPTIONS.square.find(([, label]) => label === resolution) || SIZE_OPTIONS.square[0];
-            return match[0];
+            setSize(`${dim.width}x${dim.height}`);
         }
 
         [1,2,3].forEach(id => {
@@ -631,6 +534,7 @@
             document.getElementById(`prev${index}`).src = '';
             document.getElementById(`prev${index}`).classList.add('hidden');
             document.getElementById(`del${index}`).classList.add('hidden');
+            updateSizeUI();
         }
 
         /**
@@ -819,18 +723,7 @@
                 }).catch(() => {});
             });
             const size = currentLightboxData.params?.size || '1024x1024';
-            const matchedRatio = Object.keys(SIZE_OPTIONS).find(key => SIZE_OPTIONS[key].some(([value]) => value === size)) || 'square';
-            const matchedRes = SIZE_OPTIONS[matchedRatio]?.find(([value]) => value === size)?.[1];
-            if(matchedRes) {
-                setRatio(matchedRatio, size);
-                setResolution(matchedRes);
-            } else {
-                setResolution('custom');
-                const parsed = parseSizeValue(size);
-                customWidth = parsed?.width || '';
-                customHeight = parsed?.height || '';
-                updateSizeUI();
-            }
+            setSize(size);
             closeLightbox(); window.scrollTo({top:0, behavior:'smooth'});
         }
         async function deleteHistoryItem(ts, ev){
@@ -848,7 +741,34 @@
             else if(e.key === 'ArrowLeft') lightboxNavigate(-1);
             else if(e.key === 'ArrowRight') lightboxNavigate(1);
         });
-        window.onload = async () => { applyLanguage(); setRatio('square'); setResolution('1k'); await initModels(); await loadHistory(0); window.HistoryBulkManager?.attach({masonry:'#masonry'}); observer.observe(document.getElementById('loadMoreTrigger')); document.getElementById('loadMoreTrigger').onclick = () => loadHistory(1); };
+        window.onload = async () => {
+            applyLanguage();
+            setSize('1024x1024');
+            // 绑定尺寸输入框与快捷按钮事件
+            const sizeInput = document.getElementById('sizeInput');
+            if(sizeInput){
+                sizeInput.addEventListener('input', () => {
+                    imageSize = String(sizeInput.value || '').trim().toLowerCase().replace('×','x');
+                    // 更新快捷按钮高亮
+                    const btns = document.querySelectorAll('#sizePresets .size-preset-btn');
+                    btns.forEach(btn => {
+                        const preset = (btn.dataset.size || '').toLowerCase().replace('×','x');
+                        btn.classList.toggle('active', preset === imageSize);
+                    });
+                });
+            }
+            document.querySelectorAll('#sizePresets .size-preset-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const val = btn.dataset.size;
+                    if(val) setSize(val);
+                });
+            });
+            await initModels();
+            await loadHistory(0);
+            window.HistoryBulkManager?.attach({masonry:'#masonry'});
+            observer.observe(document.getElementById('loadMoreTrigger'));
+            document.getElementById('loadMoreTrigger').onclick = () => loadHistory(1);
+        };
     </script>
 </body>
 </html>

@@ -767,7 +767,75 @@ function isGptImageAutoSizeModel(model){
         || compact.endsWith('gptimage2');
 }
 function defaultApiImageResolution(model){
+    // 保留旧函数以兼容 ModelScope 节点等仍使用 ratio+resolution 的场景。
     return isGptImageAutoSizeModel(resolveImageModel(model)) ? 'auto' : '1k';
+}
+/**
+ * 返回 API 图像生成节点默认的 size 字符串（"auto" 或 "WxH"）。
+ * @param {string} model 模型 ID
+ * @returns {string}
+ */
+function defaultApiImageSize(model){
+    return isGptImageAutoSizeModel(resolveImageModel(model)) ? 'auto' : '1024x1024';
+}
+/**
+ * 判断模型是否使用 GPT 自动尺寸（即 size 可为 "auto"）。
+ * 别名函数，语义更清晰。
+ * @param {string} model 模型 ID
+ * @returns {boolean}
+ */
+function isGptAutoSizeModel(model){
+    return isGptImageAutoSizeModel(resolveImageModel(model));
+}
+/**
+ * 校验并规范化 size 字符串：支持 "auto" 或 "WxH"（W/H 为正整数）。
+ * @param {string} value 原始 size 值
+ * @returns {string} 合法的 size 字符串，非法则返回空字符串
+ */
+function normalizeApiSizeString(value){
+    const raw = String(value || '').trim();
+    if(!raw) return '';
+    if(raw.toLowerCase() === 'auto') return 'auto';
+    const m = raw.match(/^(\d{1,5})\s*[xX*]\s*(\d{1,5})$/);
+    if(!m) return '';
+    const w = parseInt(m[1], 10);
+    const h = parseInt(m[2], 10);
+    if(w < 16 || h < 16 || w > 8192 || h > 8192) return '';
+    return `${w}x${h}`;
+}
+/**
+ * 将旧版 ratio + resolution + customSize 组合迁移为 "WxH" 尺寸字符串。
+ * 仅用于加载旧画布数据时的节点迁移，不影响其他功能模块。
+ * @param {object} node API 生成节点
+ * @returns {string} 推断的 size 字符串
+ */
+function migrateLegacyApiNodeSize(node){
+    if(!node) return '1024x1024';
+    // 显式自定义尺寸优先
+    const customParsed = parseSizeValue(node.customSize);
+    if(node.resolution === 'custom' && customParsed){
+        return `${customParsed.width}x${customParsed.height}`;
+    }
+    if(node.resolution === 'auto' || (node.ratio !== 'custom' && node.ratio !== 'source' && SIZE_MAP[node.ratio])){
+        const resolutionKey = node.resolution || '1k';
+        const ratioKey = SIZE_MAP[node.ratio] ? node.ratio : 'square';
+        const mapped = SIZE_MAP[ratioKey]?.[resolutionKey];
+        if(mapped) return mapped;
+    }
+    // 自定义比例 + 分辨率：基于长边估算
+    if(node.ratio === 'custom' && node.customRatio){
+        const parsed = parseRatioValue(node.customRatio);
+        const longSide = RES_LONG_SIDE[node.resolution] || 1024;
+        if(parsed){
+            const pixelLimit = RES_PIXEL_LIMIT[node.resolution] || (longSide * longSide);
+            const rawWidth = parsed >= 1 ? longSide : Math.min(longSide * parsed, Math.sqrt(pixelLimit * parsed));
+            const rawHeight = parsed >= 1 ? Math.min(longSide / parsed, Math.sqrt(pixelLimit / parsed)) : longSide;
+            const width = Math.max(64, Math.floor(rawWidth / 16) * 16);
+            const height = Math.max(64, Math.floor(rawHeight / 16) * 16);
+            return `${width}x${height}`;
+        }
+    }
+    return defaultApiImageSize(node.model);
 }
 function normalizedImageQuality(value){
     const quality = String(value || 'auto').trim().toLowerCase();
@@ -936,6 +1004,15 @@ function ratioPartsFromDimensions(width, height){
     const g = gcdInt(best.width, best.height);
     return {width:best.width / g, height:best.height / g};
 }
+/**
+ * 根据 ratio + resolution 组合计算尺寸字符串。
+ * 保留此函数供 ModelScope 等仍使用 ratio+resolution 的节点使用。
+ * @param {string} ratioValue 比例 key
+ * @param {string} resolutionValue 分辨率 key（auto/1k/2k/4k/custom）
+ * @param {string} customRatioValue 自定义比例（"W:H" 或小数）
+ * @param {string} customSizeValue 自定义尺寸（"WxH"）
+ * @returns {string} 尺寸字符串
+ */
 function apiImageSize(ratioValue, resolutionValue, customRatioValue = '', customSizeValue = ''){
     if(resolutionValue === 'auto') return 'auto';
     if(resolutionValue === 'custom') return String(customSizeValue || '').trim();
@@ -977,30 +1054,54 @@ function exceedsFourKStandard(width, height){
     if(!standard) return false;
     return Number(width) > standard.width || Number(height) > standard.height;
 }
+/**
+ * 规范化 API 生成节点的 size 字段（迁移旧字段 + 回退默认值）。
+ * @param {object} node generator 节点
+ */
 function normalizeApiNodeSizeChoice(node){
-    if(!node) return;
-    const allowAuto = isGptImageAutoSizeModel(resolveImageModel(node.model));
-    if(allowAuto && node._apiResolutionUserSet !== true && (!node.resolution || node.resolution === '1k')) node.resolution = 'auto';
-    else if(!node.resolution) node.resolution = allowAuto ? 'auto' : '1k';
-    if(!allowAuto && node.resolution === 'auto') node.resolution = '1k';
+    if(!node || node.type !== 'generator') return;
+    // 旧数据迁移：若节点没有 size 字段但有 ratio/resolution，尝试推断
+    if(typeof node.size === 'undefined' || node.size === null){
+        node.size = migrateLegacyApiNodeSize(node);
+    }
+    const allowAuto = isGptAutoSizeModel(node.model);
+    let size = String(node.size || '').trim();
+    if(!size){
+        size = defaultApiImageSize(node.model);
+    } else if(size.toLowerCase() === 'auto'){
+        if(!allowAuto) size = '1024x1024';
+    } else {
+        const normalized = normalizeApiSizeString(size);
+        size = normalized || defaultApiImageSize(node.model);
+    }
+    node.size = size === 'auto' ? 'auto' : size;
 }
+/**
+ * 生成 API 图像请求时实际使用的 size 字符串。
+ * 支持 size 为空或 'source' 时从参考图自动获取原始尺寸。
+ * @param {object} gen generator 节点
+ * @param {Array} refs 参考图列表
+ * @returns {Promise<string>} size 字符串（"auto" 或 "WxH"）
+ */
 async function generatorSizeForRun(gen, refs){
-    if((gen.ratio || 'square') === 'source'){
+    normalizeApiNodeSizeChoice(gen);
+    const raw = String(gen.size || '').trim();
+    // 兼容旧字段 'source'：从第一张参考图取原始尺寸
+    if(!raw || raw.toLowerCase() === 'source'){
         const ref = refs?.[0];
         if(ref?.url){
             try {
                 const dims = await getImageDimensions(ref.url);
-                const parts = ratioPartsFromDimensions(dims.width, dims.height);
-                gen.customRatioWidth = String(parts.width);
-                gen.customRatioHeight = String(parts.height);
-                gen.customRatio = `${parts.width}:${parts.height}`;
+                const w = Math.max(64, Math.round(Number(dims.width) || 1024));
+                const h = Math.max(64, Math.round(Number(dims.height) || 1024));
+                return `${w}x${h}`;
             } catch(_) {}
         }
+        return defaultApiImageSize(gen.model);
     }
-    const ratio = (gen.ratio === 'source' && !gen.customRatio)
-        ? 'square'
-        : (gen.ratio ?? 'square');
-    return apiImageSize(ratio, gen.resolution || defaultApiImageResolution(gen.model), gen.customRatio || '', gen.customSize || '');
+    if(raw.toLowerCase() === 'auto') return 'auto';
+    const normalized = normalizeApiSizeString(raw);
+    return normalized || defaultApiImageSize(gen.model);
 }
 function normalizeApiNodeLayout(node){
     if(!node || node.type !== 'generator') return;
@@ -2504,11 +2605,15 @@ function addLLMNode(point){
         running:false
     });
 }
+/**
+ * 新增一个 API 图像生成节点。
+ * 默认 size 为 "auto"（GPT 自动尺寸模型）或 "1024x1024"（其他模型）。
+ */
 function addGeneratorNode(point){
     const p = point || defaultPoint(120, 0);
     const providerId = imageApiProviders()[0]?.id || '';
     const model = allImageModels(providerId)[0] || '';
-    return addNode({id:uid('gen'), type:'generator', x:p.x, y:p.y, apiProvider:providerId, model, ratio:'square', resolution:defaultApiImageResolution(model), customRatio:'', customSize:'', customRatioWidth:'', customRatioHeight:'', customWidth:'', customHeight:'', inputs:[]});
+    return addNode({id:uid('gen'), type:'generator', x:p.x, y:p.y, apiProvider:providerId, model, size:defaultApiImageSize(model), inputs:[]});
 }
 function addMsGenNode(point){
     const p = point || defaultPoint(140, 0);

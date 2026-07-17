@@ -187,49 +187,26 @@
         .model-picker-empty { padding:16px 10px; color:var(--chat-faint); font-size:11px; font-weight:800; text-align:center; }
         .image-controls { width:auto; display:flex; align-items:center; justify-content:flex-end; gap:6px; min-width:0; }
         .image-controls.hidden { display:none; }
-        .resolution-picker { position:relative; z-index:24; width:238px; min-width:210px; max-width:270px; flex:0 0 238px; }
-        .resolution-picker.auto-mode { width:104px; min-width:104px; max-width:104px; flex-basis:104px; }
-        .resolution-picker.auto-mode .resolution-picker-button { grid-template-columns:18px minmax(0,1fr) 16px; gap:6px; padding:0 9px; }
-        .resolution-picker.auto-mode .resolution-picker-type,
-        .resolution-picker.auto-mode .resolution-picker-dot { display:none; }
-        .resolution-picker.auto-mode .resolution-picker-value { min-width:max-content; overflow:visible; text-overflow:clip; }
-        .resolution-picker.custom-mode { width:190px; min-width:180px; max-width:210px; flex-basis:190px; }
+        .resolution-picker { position:relative; z-index:24; width:132px; min-width:120px; max-width:160px; flex:0 0 132px; }
         .resolution-picker.open { z-index:80; }
-        .resolution-picker-button { width:100%; height:36px; border-radius:12px; border:1px solid var(--chat-line); background:var(--chat-panel); color:var(--chat-text); display:grid; grid-template-columns:18px minmax(0,1fr) 16px; align-items:center; gap:8px; padding:0 10px; box-shadow:none; transition:background .16s var(--ease), border-color .16s var(--ease); }
+        .resolution-picker-button { width:100%; height:36px; border-radius:12px; border:1px solid var(--chat-line); background:var(--chat-panel); color:var(--chat-text); display:grid; grid-template-columns:18px minmax(0,1fr) 16px; align-items:center; gap:6px; padding:0 9px; box-shadow:none; transition:background .16s var(--ease), border-color .16s var(--ease); }
         .resolution-picker-button:hover { background:var(--chat-soft); border-color:var(--chat-line-2); }
         .resolution-picker-button i,.resolution-picker-button svg { width:15px; height:15px; color:var(--chat-muted); }
-        .resolution-picker-labels { min-width:0; display:flex; align-items:center; gap:6px; overflow:hidden; }
-        .resolution-picker-type { flex:0 0 auto; max-width:30%; color:var(--chat-muted); font-size:10px; font-weight:900; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .resolution-picker-labels { min-width:0; display:flex; align-items:center; gap:0; overflow:hidden; }
         .resolution-picker-value { min-width:0; color:var(--chat-text); font-size:11px; font-weight:900; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .resolution-picker-dot { width:3px; height:3px; border-radius:50%; background:var(--chat-faint); flex:0 0 auto; opacity:.72; }
-        .resolution-picker-popover { position:fixed; left:var(--resolution-picker-left,20px) !important; top:var(--resolution-picker-top,120px) !important; bottom:auto; width:var(--resolution-picker-width,min(420px,calc(100vw - 40px))); max-height:var(--resolution-picker-max-height,min(390px,68vh)); display:none; grid-template-rows:auto minmax(0,1fr); overflow:hidden; border:1px solid var(--chat-line); border-radius:14px; background:var(--chat-panel); box-shadow:0 12px 30px rgba(15,23,42,.10); z-index:9999; }
+        .resolution-picker-popover { position:fixed; left:var(--resolution-picker-left,20px) !important; top:var(--resolution-picker-top,120px) !important; bottom:auto; width:var(--resolution-picker-width,min(280px,calc(100vw - 40px))); display:none; flex-direction:column; gap:0; padding:10px; overflow:hidden; border:1px solid var(--chat-line); border-radius:14px; background:var(--chat-panel); box-shadow:0 12px 30px rgba(15,23,42,.10); z-index:9999; }
         .resolution-picker.open .resolution-picker-popover,
-        .resolution-picker-popover.open { display:grid; animation:popIn .16s var(--ease); }
-        .resolution-picker-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 10px 8px; border-bottom:1px solid var(--chat-line); }
-        .resolution-picker-title { color:var(--chat-text); font-size:12px; font-weight:950; }
-        .resolution-picker-scope { display:flex; align-items:center; gap:3px; padding:3px; border:1px solid var(--chat-line); border-radius:12px; background:var(--chat-soft); box-shadow:none; }
-        .resolution-picker-scope button { height:30px; min-width:58px; border-radius:10px; background:transparent; color:var(--chat-muted); font-size:11px; font-weight:950; }
-        .resolution-picker-scope button.active { background:var(--chat-panel); color:var(--chat-text); box-shadow:none; }
-        .resolution-picker-pane { min-height:0; }
-        .resolution-picker-pane.hidden { display:none !important; }
-        .resolution-picker-pane.preset { display:grid; grid-template-columns:minmax(120px,.82fr) minmax(0,1.18fr); }
-        .resolution-picker-pane.custom { padding:10px; }
-        .resolution-picker-list { min-height:0; max-height:var(--resolution-picker-list-height,320px); overflow:auto; padding:8px; display:flex; flex-direction:column; gap:4px; }
-        .resolution-picker-list + .resolution-picker-list { border-left:1px solid var(--chat-line); }
-        .resolution-picker-option { width:100%; min-height:40px; border-radius:10px; padding:7px 9px; display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:8px; background:transparent; color:var(--chat-muted); text-align:left; }
-        .resolution-picker-option:hover { background:var(--chat-soft); color:var(--chat-text); }
-        .resolution-picker-option.active { background:var(--chat-soft); color:var(--chat-text); }
-        .resolution-picker-option span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; font-weight:950; }
-        .resolution-picker-option small { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10px; font-weight:850; opacity:.72; }
-        .resolution-custom-box { padding:9px; border:1px solid var(--chat-line); border-radius:12px; background:var(--chat-panel); }
-        .resolution-custom-title { margin-bottom:7px; color:var(--chat-text); font-size:11px; font-weight:950; }
-        .resolution-custom-row { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto; align-items:center; gap:6px; }
-        .resolution-custom-row input { width:100%; height:30px; min-width:0; border:1px solid var(--chat-line-2); border-radius:9px; background:var(--chat-panel-2); color:var(--chat-text); padding:0 8px; font-size:11px; font-weight:850; outline:none; }
-        .resolution-custom-row input:focus { border-color:var(--chat-line-2); box-shadow:none; }
-        .resolution-custom-row span { color:var(--chat-faint); font-size:11px; font-weight:900; }
-        .resolution-custom-row button { height:30px; min-width:46px; border-radius:9px; background:var(--chat-soft); color:var(--chat-text); border:1px solid var(--chat-line); font-size:11px; font-weight:950; padding:0 10px; }
-        .resolution-custom-hint { margin-top:6px; color:var(--chat-faint); font-size:10px; font-weight:750; }
-        .resolution-custom-hint.error { color:#dc2626; }
+        .resolution-picker-popover.open { display:flex; animation:popIn .16s var(--ease); }
+        .size-input-wrap { position:relative; margin-bottom:8px; }
+        .size-input-wrap input { width:100%; height:34px; border:1px solid var(--chat-line); border-radius:10px; background:var(--chat-panel-2); color:var(--chat-text); padding:0 10px; font-size:12px; font-weight:850; outline:none; transition:border-color .16s var(--ease); }
+        .size-input-wrap input:focus { border-color:var(--chat-line-2); }
+        .size-input-wrap input::placeholder { color:var(--chat-faint); }
+        .size-preset-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; }
+        .size-preset-btn { width:100%; min-height:36px; border-radius:10px; border:1px solid var(--chat-line); background:var(--chat-panel-2); color:var(--chat-muted); padding:6px 8px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px; font-size:12px; font-weight:900; transition:background .14s var(--ease), color .14s var(--ease), border-color .14s var(--ease); }
+        .size-preset-btn:hover { background:var(--chat-soft); color:var(--chat-text); border-color:var(--chat-line-2); }
+        .size-preset-btn.active { background:var(--chat-strong); color:var(--chat-strong-text); border-color:var(--chat-strong); }
+        .size-preset-btn small { font-size:9px; font-weight:750; opacity:.65; letter-spacing:.04em; }
+        .size-preset-btn.active small { opacity:.8; }
         .composer-body { flex:1 1 auto; min-height:92px; min-width:0; border:1px solid transparent; background:var(--chat-panel-2); border-radius:14px; padding:10px; display:flex; flex-direction:column; gap:8px; overflow:hidden; }
         .composer-body:focus-within,
         .composer-body.has-overflow { overflow:auto; }
@@ -387,14 +364,6 @@
         body.studio-theme-dark .resolution-picker-popover,
         html.theme-dark body .resolution-picker-popover,
         body.theme-dark .resolution-picker-popover { background:var(--chat-panel) !important; border-color:var(--chat-line) !important; box-shadow:0 12px 30px rgba(0,0,0,.22) !important; color:var(--chat-text) !important; }
-        html.studio-theme-dark body .resolution-picker-head,
-        body.studio-theme-dark .resolution-picker-head,
-        html.theme-dark body .resolution-picker-head,
-        body.theme-dark .resolution-picker-head,
-        html.studio-theme-dark body .resolution-custom-box,
-        body.studio-theme-dark .resolution-custom-box,
-        html.theme-dark body .resolution-custom-box,
-        body.theme-dark .resolution-custom-box { border-color:var(--chat-line) !important; background:var(--chat-panel-2) !important; }
         html.studio-theme-dark body .mode-switch button.active,
         body.studio-theme-dark .mode-switch button.active,
         html.theme-dark body .mode-switch button.active,
@@ -429,9 +398,7 @@
             .model-picker-list + .model-picker-list { border-left:0; border-top:1px solid var(--chat-line); }
             .image-controls { align-items:stretch; flex-direction:column; gap:5px; }
             .resolution-picker { width:100%; min-width:0; max-width:none; flex-basis:auto; }
-            .resolution-picker-popover { left:0; right:0; width:100%; max-height:360px; }
-            .resolution-picker-pane.preset { grid-template-columns:1fr; }
-            .resolution-picker-list + .resolution-picker-list { border-left:0; border-top:1px solid var(--chat-line); }
+            .resolution-picker-popover { left:0; right:0; width:100% !important; max-height:360px; }
             .composer-inside-foot { align-items:end; }
             .ref-strip { max-width:100%; }
             .bubble { max-width:90%; }
@@ -534,59 +501,19 @@
                                         </div>
                                     </div>
                                     <div id="imageControls" class="image-controls hidden">
-                                        <div id="resolutionPicker" class="resolution-picker" title="比例和分辨率">
-                                            <button id="resolutionPickerBtn" class="resolution-picker-button" onclick="event.stopPropagation();toggleResolutionPicker()" title="比例和分辨率">
+                                        <div id="resolutionPicker" class="resolution-picker" title="图片尺寸 (size)">
+                                            <button id="resolutionPickerBtn" class="resolution-picker-button" onclick="event.stopPropagation();toggleResolutionPicker()" title="图片尺寸 (size)">
                                                 <i data-lucide="ruler"></i>
                                                 <span class="resolution-picker-labels">
-                                                    <span id="resolutionPickerType" class="resolution-picker-type">尺寸</span>
-                                                    <span class="resolution-picker-dot"></span>
-                                                    <span id="resolutionPickerValue" class="resolution-picker-value">自动</span>
+                                                    <span id="resolutionPickerValue" class="resolution-picker-value">auto</span>
                                                 </span>
                                                 <i data-lucide="chevron-up"></i>
                                             </button>
                                             <div id="resolutionPickerPopover" class="resolution-picker-popover" onclick="event.stopPropagation()">
-                                                <div class="resolution-picker-head">
-                                                    <div class="resolution-picker-title">尺寸选择</div>
-                                                    <div id="resolutionPickerScope" class="resolution-picker-scope">
-                                                        <button id="resolutionScopeAuto" type="button" class="active" onclick="setResolutionPickerScope('auto')">自动</button>
-                                                        <button id="resolutionScopePreset" type="button" onclick="setResolutionPickerScope('preset')">内置尺寸</button>
-                                                        <button id="resolutionScopeCustom" type="button" onclick="setResolutionPickerScope('custom')">自定义</button>
-                                                    </div>
+                                                <div class="size-input-wrap">
+                                                    <input id="chatSizeInput" type="text" placeholder="1024x1024 或 auto" oninput="handleChatSizeInput(event)">
                                                 </div>
-                                                <div id="resolutionAutoPane" class="resolution-picker-pane custom">
-                                                    <div class="resolution-custom-box">
-                                                        <div class="resolution-custom-title">自动尺寸</div>
-                                                        <div class="resolution-custom-hint">默认 1024x1024；提示词包含比例或明确尺寸时自动匹配。</div>
-                                                    </div>
-                                                </div>
-                                                <div id="resolutionPresetPane" class="resolution-picker-pane preset hidden">
-                                                    <div id="resolutionRatioList" class="resolution-picker-list">
-                                                        <button id="chat-ratio-square" type="button" class="resolution-picker-option active" onclick="selectBuiltInRatio('square')"><span>1:1</span><small>正方形</small></button>
-                                                        <button id="chat-ratio-portrait" type="button" class="resolution-picker-option" onclick="selectBuiltInRatio('portrait')"><span>2:3</span><small>竖图</small></button>
-                                                        <button id="chat-ratio-landscape" type="button" class="resolution-picker-option" onclick="selectBuiltInRatio('landscape')"><span>3:2</span><small>横图</small></button>
-                                                        <button id="chat-ratio-portrait43" type="button" class="resolution-picker-option" onclick="selectBuiltInRatio('portrait43')"><span>3:4</span><small>竖图</small></button>
-                                                        <button id="chat-ratio-landscape43" type="button" class="resolution-picker-option" onclick="selectBuiltInRatio('landscape43')"><span>4:3</span><small>横图</small></button>
-                                                        <button id="chat-ratio-story" type="button" class="resolution-picker-option" onclick="selectBuiltInRatio('story')"><span>9:16</span><small>竖屏</small></button>
-                                                        <button id="chat-ratio-wide" type="button" class="resolution-picker-option" onclick="selectBuiltInRatio('wide')"><span>16:9</span><small>宽屏</small></button>
-                                                    </div>
-                                                    <div id="resolutionLevelList" class="resolution-picker-list">
-                                                        <button type="button" class="resolution-picker-option" data-resolution="1k" onclick="selectResolutionPreset('1k')"><span>1K</span><small id="resolutionPreset1k">1024x1024</small></button>
-                                                        <button type="button" class="resolution-picker-option" data-resolution="2k" onclick="selectResolutionPreset('2k')"><span>2K</span><small id="resolutionPreset2k">1536x1536</small></button>
-                                                        <button type="button" class="resolution-picker-option" data-resolution="4k" onclick="selectResolutionPreset('4k')"><span>4K</span><small id="resolutionPreset4k">2048x2048</small></button>
-                                                    </div>
-                                                </div>
-                                                <div id="resolutionCustomPane" class="resolution-picker-pane custom hidden">
-                                                    <div class="resolution-custom-box">
-                                                        <div class="resolution-custom-title">自定义分辨率</div>
-                                                        <div class="resolution-custom-row">
-                                                            <input id="customResolutionWidth" type="number" min="256" max="8192" step="1" placeholder="宽">
-                                                            <span>x</span>
-                                                            <input id="customResolutionHeight" type="number" min="256" max="8192" step="1" placeholder="高">
-                                                            <button type="button" onclick="applyCustomResolution()">应用</button>
-                                                        </div>
-                                                        <div id="customResolutionHint" class="resolution-custom-hint">输入 256-8192 之间的宽度和高度</div>
-                                                    </div>
-                                                </div>
+                                                <div id="sizePresetGrid" class="size-preset-grid"></div>
                                             </div>
                                         </div>
                                     </div>
@@ -638,9 +565,20 @@
         const CHAT_SETTINGS_KEY = 'gpt_chat_settings_v1';
         const CHAT_LAST_CONVERSATION_KEY = 'gpt_chat_last_conversation_v1';
         const CHAT_ATTACHMENT_MAX = 20;
-        const CHAT_SIZE_MODE_VERSION = 2;
+        const CHAT_SIZE_MODE_VERSION = 3;
         const userId = localStorage.getItem(USER_KEY) || uuid();
         localStorage.setItem(USER_KEY, userId);
+
+        /** 预设尺寸列表：[value, 中文描述] */
+        const CHAT_SIZE_PRESETS = [
+            ['auto', '自动'],
+            ['1024x1024', '方图'],
+            ['1536x1024', '横图'],
+            ['1024x1536', '竖图'],
+            ['1024x1792', '长竖图'],
+            ['1792x1024', '长横图'],
+        ];
+        const CHAT_SIZE_PRESET_SET = new Set(CHAT_SIZE_PRESETS.map(([v]) => v));
 
         function readChatSettings(){
             try {
@@ -656,6 +594,38 @@
             return value && typeof value === 'object' && !Array.isArray(value);
         }
 
+        /**
+         * 将旧版本保存的尺寸配置迁移为 WxH 格式字符串。
+         * @param {object} s - 已保存的设置对象
+         * @returns {string} 迁移后的 size 值（"auto" 或 "WxH"）
+         */
+        function migrateLegacyChatSize(s){
+            // 新版本已直接保存 chatSize
+            if(typeof s.chatSize === 'string' && s.chatSize){
+                if(s.chatSize === 'auto') return 'auto';
+                if(normalizeChatCustomSize(s.chatSize)) return normalizeChatCustomSize(s.chatSize);
+            }
+            // 旧字段迁移：chatResolution / chatRatio / chatPresetResolution / chatCustomSize
+            const ratioMap = { square:'1:1', portrait:'2:3', portrait43:'3:4', landscape43:'4:3', landscape:'3:2', story:'9:16', wide:'16:9' };
+            const legacySizeMap = {
+                '1:1':  { '1k':'1024x1024', '2k':'1536x1536', '4k':'2048x2048' },
+                '2:3':  { '1k':'1024x1536', '2k':'1365x2048', '4k':'1440x2160' },
+                '3:2':  { '1k':'1536x1024', '2k':'2048x1365', '4k':'2160x1440' },
+                '3:4':  { '1k':'1024x1365', '2k':'1536x2048', '4k':'1800x2400' },
+                '4:3':  { '1k':'1365x1024', '2k':'2048x1536', '4k':'2400x1800' },
+                '9:16': { '1k':'1080x1920', '2k':'1080x1920', '4k':'1440x2560' },
+                '16:9': { '1k':'1920x1080', '2k':'1920x1080', '4k':'2560x1440' },
+            };
+            if(s.chatResolution === 'custom'){
+                const c = normalizeChatCustomSize(s.chatCustomSize || '');
+                if(c) return c;
+            }
+            if(s.chatResolution === 'auto' || !s.chatResolution) return 'auto';
+            const ratio = ratioMap[s.chatRatio] || '1:1';
+            const level = ['1k','2k','4k'].includes(s.chatPresetResolution) ? s.chatPresetResolution : '1k';
+            return (legacySizeMap[ratio] && legacySizeMap[ratio][level]) || '1024x1024';
+        }
+
         const savedChatSettings = readChatSettings();
         let conversations = [];
         let currentConversation = null;
@@ -668,25 +638,12 @@
         let systemPrompt = String(savedChatSettings.systemPrompt || '').trim();
         let apiProviders = [];
         let chatProviderModels = isObject(savedChatSettings.chatProviderModels) ? savedChatSettings.chatProviderModels : {};
-        let chatRatio = ['square','portrait','portrait43','landscape43','landscape','story','wide'].includes(savedChatSettings.chatRatio) ? savedChatSettings.chatRatio : 'square';
-        let chatResolution = savedChatSettings.chatSizeModeVersion === CHAT_SIZE_MODE_VERSION && ['auto','1k','2k','4k','custom'].includes(savedChatSettings.chatResolution) ? savedChatSettings.chatResolution : 'auto';
-        let chatPresetResolution = ['1k','2k','4k'].includes(savedChatSettings.chatPresetResolution) ? savedChatSettings.chatPresetResolution : (chatResolution === 'custom' ? '1k' : chatResolution);
-        let chatCustomSize = normalizeChatCustomSize(savedChatSettings.chatCustomSize || '') || '1024x1024';
+        let chatSize = migrateLegacyChatSize(savedChatSettings);
         let modelPickerScope = savedChatSettings.modelPickerScope === 'image' ? 'image' : 'chat';
         let modelPickerHome = null;
         let resolutionPickerHome = null;
         let refs = [];
         let config = { chat_model: 'gpt-5.5', image_model: 'gpt-image-2', ms_chat_models: [] };
-
-        const SIZE_OPTIONS = {
-            square: [['1024x1024','1k'], ['1536x1536','2k'], ['2048x2048','4k']],
-            portrait: [['720x1080','1k'], ['1024x1536','2k'], ['1365x2048','4k']],
-            portrait43: [['1008x1344','1k'], ['1536x2048','2k'], ['2448x3264','4k']],
-            landscape43: [['1344x1008','1k'], ['2048x1536','2k'], ['3264x2448','4k']],
-            landscape: [['1080x720','1k'], ['1536x1024','2k'], ['2048x1365','4k']],
-            story: [['720x1280','1k'], ['1080x1920','2k'], ['1440x2560','4k']],
-            wide: [['1280x720','1k'], ['1920x1080','2k'], ['2560x1440','4k']]
-        };
 
         const headers = () => ({'Content-Type':'application/json', 'X-User-ID':userId});
 
@@ -713,10 +670,7 @@
                     activeImageModel,
                     systemPrompt,
                     chatProviderModels,
-                    chatRatio,
-                    chatResolution,
-                    chatPresetResolution,
-                    chatCustomSize,
+                    chatSize,
                     modelPickerScope,
                     chatSizeModeVersion: CHAT_SIZE_MODE_VERSION
                 }));
@@ -960,29 +914,21 @@
             const rect = btn.getBoundingClientRect();
             const viewportW = (window.visualViewport?.width || window.innerWidth);
             const viewportH = (window.visualViewport?.height || window.innerHeight);
-            const desiredWidth = chatResolution === 'auto' ? 300 : (chatResolution === 'custom' ? 340 : 420);
-            const width = Math.min(desiredWidth, Math.max(260, viewportW - 32));
+            const desiredWidth = 260;
+            const width = Math.min(desiredWidth, Math.max(240, viewportW - 32));
             const safeX = 12;
             const safeTop = 12;
-            const safeBottom = 18;
             const gap = 10;
             const left = Math.min(Math.max(safeX, rect.left + rect.width / 2 - width / 2), Math.max(safeX, viewportW - width - safeX));
-            const availableAbove = Math.max(96, rect.top - safeTop - gap);
-            const initialHeight = Math.min(chatResolution === 'auto' ? 220 : 390, availableAbove, viewportH - safeTop - safeBottom);
-            const initialTop = Math.max(safeTop, rect.top - initialHeight - gap);
             pop.style.setProperty('--resolution-picker-left', `${Math.round(left)}px`);
-            pop.style.setProperty('--resolution-picker-top', `${Math.round(initialTop)}px`);
             pop.style.setProperty('--resolution-picker-width', `${Math.round(width)}px`);
-            pop.style.setProperty('--resolution-picker-max-height', `${Math.round(initialHeight)}px`);
-            pop.style.setProperty('--resolution-picker-list-height', '320px');
+            // 自然高度
             requestAnimationFrame(() => {
-                const naturalHeight = Math.ceil(pop.scrollHeight || pop.getBoundingClientRect().height || 160);
-                const maxHeight = Math.max(96, Math.min(naturalHeight, availableAbove, viewportH - safeTop - safeBottom));
-                const headHeight = Math.ceil(pop.querySelector('.resolution-picker-head')?.getBoundingClientRect().height || 50);
-                const listHeight = Math.max(58, maxHeight - headHeight - 20);
+                const naturalHeight = Math.ceil(pop.scrollHeight || pop.getBoundingClientRect().height || 200);
+                const availableAbove = Math.max(120, rect.top - safeTop - gap);
+                const maxHeight = Math.max(120, Math.min(naturalHeight, availableAbove, viewportH - safeTop * 2));
                 const top = Math.max(safeTop, rect.top - maxHeight - gap);
                 pop.style.setProperty('--resolution-picker-max-height', `${Math.round(maxHeight)}px`);
-                pop.style.setProperty('--resolution-picker-list-height', `${Math.round(listHeight)}px`);
                 pop.style.setProperty('--resolution-picker-top', `${Math.round(top)}px`);
                 const box = pop.getBoundingClientRect();
                 const nextLeft = box.right > viewportW - 12 ? (left - (box.right - viewportW + 12)) : left;
