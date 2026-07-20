@@ -2469,6 +2469,7 @@ class DeleteHistoryRequest(BaseModel):
 class DeleteCanvasLogRequest(BaseModel):
     log_id: str
     delete_unreferenced_media: bool = False
+    delete_referencing_nodes: bool = False
     base_updated_at: int = 0
 
 class TokenRequest(BaseModel):
@@ -6404,6 +6405,41 @@ def prune_generation_history_for_media(paths: List[str]) -> int:
             return removed
     except (OSError, UnicodeError, json.JSONDecodeError):
         return 0
+
+def remove_canvas_result_nodes_for_media(canvas: Dict[str, Any], paths: List[str]) -> List[str]:
+    """Remove generated-result nodes that own media selected for hard deletion."""
+    removed_ids = []
+    kept_nodes = []
+    for node in list(canvas.get("nodes") or []):
+        node_type = str(node.get("type") or "").strip().lower()
+        if node_type in {"smart-image", "output"} and isinstance(node.get("images"), list):
+            images = list(node.get("images") or [])
+            kept_images = [
+                item for item in images
+                if not any(json_references_media_path(item, path) for path in paths)
+            ]
+            if len(kept_images) != len(images):
+                if not kept_images:
+                    if node.get("id"):
+                        removed_ids.append(str(node["id"]))
+                    continue
+                node = dict(node)
+                node["images"] = kept_images
+        elif node_type == "image" and any(json_references_media_path(node.get("url"), path) for path in paths):
+            if node.get("id"):
+                removed_ids.append(str(node["id"]))
+            continue
+        kept_nodes.append(node)
+
+    if removed_ids:
+        removed = set(removed_ids)
+        canvas["nodes"] = kept_nodes
+        canvas["connections"] = [
+            connection for connection in list(canvas.get("connections") or [])
+            if str(connection.get("from") or "") not in removed
+            and str(connection.get("to") or "") not in removed
+        ]
+    return removed_ids
 
 def delete_media_preview_cache(path: str) -> int:
     """Delete derived previews for a source file before the source disappears."""
@@ -16087,11 +16123,15 @@ async def delete_canvas_log(canvas_id: str, payload: DeleteCanvasLogRequest):
                     if path and path not in candidate_paths:
                         candidate_paths.append(path)
 
+            removed_node_ids = []
+            if payload.delete_referencing_nodes and candidate_paths:
+                removed_node_ids = remove_canvas_result_nodes_for_media(canvas, candidate_paths)
+
             canvas["logs"] = [item for item in logs if str(item.get("id") or "") != log_id]
             save_canvas(canvas)
-            return canvas, candidate_paths
+            return canvas, candidate_paths, removed_node_ids
 
-    canvas, candidate_paths = await asyncio.to_thread(remove_log_record)
+    canvas, candidate_paths, removed_node_ids = await asyncio.to_thread(remove_log_record)
 
     def cleanup_unreferenced_media():
         removed_files = []
@@ -16128,6 +16168,7 @@ async def delete_canvas_log(canvas_id: str, payload: DeleteCanvasLogRequest):
         "canvas": canvas,
         "removed_files": removed_files,
         "removed_previews": removed_previews,
+        "removed_node_ids": removed_node_ids,
         "skipped_referenced": skipped_referenced,
     }
 

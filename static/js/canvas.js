@@ -12094,17 +12094,26 @@ async function deleteCanvasLogEntry(logId, deleteMedia=false){
             body:JSON.stringify({
                 log_id:logId,
                 delete_unreferenced_media:deleteMedia,
+                delete_referencing_nodes:deleteMedia,
                 base_updated_at:Number(canvas.updated_at || lastCanvasUpdatedAt || 0)
             })
         });
         const data = await res.json().catch(() => ({}));
         if(!res.ok) throw new Error(data.detail || tr('canvas.logDeleteFailed'));
         canvas.logs = data.canvas?.logs || (canvas.logs || []).filter(item => item.id !== logId);
+        if(data.canvas?.nodes){
+            canvas.nodes = data.canvas.nodes;
+            canvas.connections = data.canvas.connections || [];
+            nodes = canvas.nodes;
+            connections = canvas.connections;
+            render();
+        }
         canvas.updated_at = Number(data.canvas?.updated_at || canvas.updated_at || Date.now());
         lastCanvasUpdatedAt = canvas.updated_at;
         renderCanvasLog();
         const notes = [tr('canvas.logDeleted')];
         if(data.removed_files?.length) notes.push(tr('canvas.logMediaRemoved').replace('{n}', data.removed_files.length));
+        if(data.removed_node_ids?.length) notes.push(tr('canvas.logNodesRemoved').replace('{n}', data.removed_node_ids.length));
         if(data.skipped_referenced?.length) notes.push(tr('canvas.logMediaReferenced').replace('{n}', data.skipped_referenced.length));
         setStatus(notes.join(' · '));
     } catch(err) {

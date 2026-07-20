@@ -123,6 +123,33 @@ class CanvasLogCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["removed_files"], [])
         self.assertEqual(result["skipped_referenced"], [path.name])
 
+    async def test_forced_cleanup_removes_result_node_and_media(self):
+        path, url = self.generated_file("node-owned.png")
+        self.write_canvas(
+            "remove_node",
+            [{"id": "log-1", "outputs": [{"url": url}]}],
+            nodes=[
+                {"id": "prompt", "type": "smart-prompt"},
+                {"id": "result", "type": "smart-image", "images": [{"url": url}]},
+            ],
+        )
+        stored = json.loads((self.canvases / "remove_node.json").read_text(encoding="utf-8"))
+        stored["connections"] = [{"id": "edge", "from": "prompt", "to": "result"}]
+        (self.canvases / "remove_node.json").write_text(json.dumps(stored), encoding="utf-8")
+
+        result = await main.delete_canvas_log(
+            "remove_node",
+            main.DeleteCanvasLogRequest(
+                log_id="log-1",
+                delete_unreferenced_media=True,
+                delete_referencing_nodes=True,
+            ),
+        )
+
+        self.assertFalse(path.exists())
+        self.assertEqual([node["id"] for node in result["canvas"]["nodes"]], ["prompt"])
+        self.assertEqual(result["canvas"]["connections"], [])
+
     async def test_cleanup_deletes_unreferenced_media_and_preview(self):
         path, url = self.generated_file()
         preview = Path(main.media_preview_cache_paths(str(path), 256)[0])
