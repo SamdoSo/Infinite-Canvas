@@ -5734,14 +5734,26 @@ def jimeng_image_resolution(model, size, mode="text2image"):
         desired = "2k"
     else:
         width, height = parse_size_pair(size)
-        desired = "4k" if max(width, height) > 2048 else "2k"
+     # 修复生图分辨率强制变2K   
+        longest_side = max(width, height)
+        pixel_count = width * height
+        if longest_side > 3072 or pixel_count > 6000000:
+            desired = "4k"
+        elif longest_side > 1536 or pixel_count > 1572864:
+            desired = "2k"
+        else:
+            desired = "1k"
     # 按官方规则收敛到模型允许的分辨率
     version = jimeng_normalize_image_model(model)
     if mode == "image2image":
-        # image2image 只支持 2k/4k
+        # image2image 仅 5.0Pro 支持 1k；其他模型只支持 2k/4k。
+        if version == "5.0Pro":
+            return desired if desired in ("1k", "2k", "4k") else "1k"
         return "4k" if desired == "4k" else "2k"
-    if version in ("3.0", "3.1"):
-        # 3.0/3.1 只支持 1k/2k
+    if version in ("3.0", "3.1", "5.0Pro"):
+        # 3.0/3.1/5.0Pro 支持 1k/2k；5.0Pro 另外支持 4k。
+        if version == "5.0Pro" and desired == "4k":
+            return "4k"
         return "1k" if desired == "1k" else "2k"
     # 4.x/5.0 只支持 2k/4k
     return "4k" if desired == "4k" else "2k"
