@@ -1,6 +1,6 @@
 {
-  "version": "2026.07.02",
-  "updated_at": "2026-07-02T20:00:00+08:00",
+  "version": "2026.07.17",
+  "updated_at": "2026-07-17T21:50:36+08:00",
   "items": [
     {
       "type": "fix",
@@ -13,6 +13,14 @@
     {
       "type": "fix",
       "text": "修复 .env 文件权限错误（目录问题）"
+    },
+    {
+      "type": "feature",
+      "text": "修复exellome和FHL的编辑功能报错bug"
+    },
+    {
+      "type": "feature",
+      "text": "修复mac系统缩放bug"
     }
   ]
 }

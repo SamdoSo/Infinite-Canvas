@@ -14,6 +14,26 @@ body { margin:0; height:100vh; overflow:hidden; color:var(--text); font-family:'
 button,input,select,textarea { font:inherit; }
 button { border:0; cursor:pointer; }
 .shell { position:relative; width:100vw; height:100vh; overflow:hidden; background-color:var(--page); background-image:radial-gradient(var(--grid) 1px, transparent 1px); background-size:24px 24px; cursor:grab; }
+html[data-studio-scale="off"].studio-scale-managed .smart-back,
+html[data-studio-scale="off"].studio-scale-managed .smart-title,
+html[data-studio-scale="off"].studio-scale-managed .smart-log-toggle,
+html[data-studio-scale="off"].studio-scale-managed .smart-shortcut-toggle,
+html[data-studio-scale="off"].studio-scale-managed .smart-workflow-toggle,
+html[data-studio-scale="off"].studio-scale-managed .asset-toggle,
+/* 注意：.composer 不能加进这份 zoom 列表——它在 .world 内用世界坐标定位，
+   单独 zoom 会让坐标按 scale 重算，离原点越远偏移越大（小屏下直接飞出屏幕外） */
+html[data-studio-scale="off"].studio-scale-managed .smart-minimap,
+html[data-studio-scale="off"].studio-scale-managed .smart-log-panel,
+html[data-studio-scale="off"].studio-scale-managed .shortcut-panel,
+html[data-studio-scale="off"].studio-scale-managed .workflow-panel,
+html[data-studio-scale="off"].studio-scale-managed .asset-panel,
+html[data-studio-scale="off"].studio-scale-managed .asset-dock,
+html[data-studio-scale="off"].studio-scale-managed .asset-dialog,
+html[data-studio-scale="off"].studio-scale-managed .asset-hover-preview,
+html[data-studio-scale="off"].studio-scale-managed .image-edit-modal,
+html[data-studio-scale="off"].studio-scale-managed .preview-modal {
+    zoom: var(--studio-ui-scale, 1);
+}
 .shell.panning { cursor:grabbing; }
 .shell.zoom-preview { cursor:crosshair; }
 .world { position:absolute; left:0; top:0; width:6000px; height:4000px; transform-origin:0 0; }
@@ -432,6 +452,14 @@ video.node-img { object-fit:cover; background:#0f172a; }
 .connection-layer .conn-hit { pointer-events:stroke; cursor:pointer; }
 .connection-layer .conn-cut { pointer-events:auto; cursor:pointer; opacity:.55; transition:opacity .14s ease; }
 .connection-layer .conn-cut:hover { opacity:1; }
+.shell.connection-erasing, .shell.connection-erasing .connection-layer .conn-hit, .shell.connection-erasing .connection-layer .conn-cut { cursor:crosshair !important; }
+.connection-layer .conn-erasing-mark.conn-line { stroke:#ef4444 !important; opacity:.42 !important; stroke-dasharray:4 5; }
+.connection-layer .conn-erasing-mark.conn-end { fill:#ef4444 !important; opacity:.36 !important; }
+.connection-layer .conn-erasing-mark.conn-cut { opacity:.28 !important; }
+.connection-erase-trail { position:absolute; inset:0; z-index:24; width:100%; height:100%; pointer-events:none; overflow:visible; opacity:1; transition:opacity .18s ease; }
+.connection-erase-trail.fading { opacity:0; }
+.connection-erase-trail-glow { stroke:rgba(239,68,68,.22); stroke-width:13; stroke-linecap:round; stroke-linejoin:round; }
+.connection-erase-trail-line { stroke:rgba(239,68,68,.92); stroke-width:2.4; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:7 5; }
 .connection-layer .conn-pending { stroke-dasharray:5 4; animation:dash-flow-pending .9s linear infinite; }
 .connection-layer .conn-cascade { filter:none; }
 .connection-layer .conn-cascade-wait { stroke-dasharray:7 6; opacity:.58; }
@@ -1087,6 +1115,12 @@ input[type=range].smart-range::-webkit-slider-thumb { -webkit-appearance:none; w
 .log-error.copied { color:#059669; border-color:rgba(5,150,105,.35); background:rgba(5,150,105,.1); font-weight:900; }
 .log-prompt { width:100%; max-width:560px; color:var(--faint); font-size:10.5px; line-height:1.35; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:copy; }
 .log-prompt.copied { color:#059669; font-weight:900; }
+.log-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.log-actions button { min-height:28px; padding:0 10px; border-radius:9px; display:inline-flex; align-items:center; gap:5px; border:1px solid var(--line); background:var(--card); color:var(--muted); font-size:10px; font-weight:850; }
+.log-actions button:hover { border-color:var(--text); color:var(--text); }
+.log-actions button.danger { color:#dc2626; border-color:rgba(239,68,68,.28); background:rgba(239,68,68,.08); }
+.log-actions button.danger:hover { border-color:#dc2626; background:rgba(239,68,68,.14); }
+.log-actions button i,.log-actions button svg { width:13px; height:13px; }
 .log-thumbs { display:flex; gap:6px; align-items:flex-start; justify-content:flex-end; max-width:126px; flex-wrap:wrap; }
 .log-thumbs img,.log-thumbs video { width:38px; height:38px; object-fit:cover; border-radius:8px; border:1px solid var(--line); background:#0f172a; cursor:pointer; }
 .asset-panel { position:absolute; right:22px; top:66px; bottom:168px; z-index:55; width:300px; max-width:calc(100vw - 44px); min-height:0; display:flex; flex-direction:column; gap:10px; padding:12px; border-radius:18px; background:var(--panel); border:1px solid var(--line); box-shadow:0 22px 58px var(--shadow); -webkit-backdrop-filter:blur(20px); backdrop-filter:blur(20px); overflow:hidden; transform:translateX(16px); opacity:0; visibility:hidden; pointer-events:none; transition:opacity .16s ease, transform .16s ease, visibility .16s ease; }
